@@ -1,4 +1,4 @@
-// Quiz & Mímica, fase 1: sala, entrada por QR, perguntas, relógio, pontos e classificação.
+// Quiz & Mímica, fases 1 e 2: sala, entrada por QR, sorteio de equipas, perguntas, relógio, pontos e classificação.
 
 import * as net from "./net.js";
 import { lerFolha } from "./sheet.js";
@@ -21,13 +21,18 @@ const DIFS = { 1: "Fácil", 2: "Média", 3: "Difícil" };
 // undefined = ainda a carregar; null = não existe.
 const S = {
   uid: null, meta: undefined, estado: undefined, equipas: undefined, priv: undefined,
+  jogadores: undefined, hostExtra: false,
   respostas: null, respKey: null, minha: null,
   ui: { criar: { passo: "folha" } },
 };
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const caminho = (p) => `rooms/${SALA}/${p}`;
-const souAnfitriao = () => !!S.meta && S.meta.hostUid === S.uid;
+const souAnfitriao = () => !!S.meta && (S.meta.hostUid === S.uid || S.hostExtra);
+const modo = () => (S.estado && S.estado.cfg && S.estado.cfg.modo) || "livre";
+const minhaEquipa = () => Object.keys(S.equipas || {}).find((id) => S.equipas[id].cap === S.uid) || null;
+const porOrdem = (eq) => Object.keys(eq || {}).sort((a, b) => (eq[a].ord ?? 99) - (eq[b].ord ?? 99) || (eq[a].at || 0) - (eq[b].at || 0));
+const membros = (t) => (t && t.m) || [];
 const limita = (v, min, max) => Math.max(min, Math.min(max, v));
 const plural = (n, um, varios) => `${n} ${n === 1 ? um : varios}`;
 
@@ -52,7 +57,7 @@ function desenhar() {
   const ativo = document.activeElement && document.activeElement.id;
   const escrito = {};
   app.querySelectorAll("input[id], textarea[id]").forEach((el) => {
-    escrito[el.id] = el.type === "checkbox" ? { c: el.checked } : { v: el.value };
+    escrito[el.id] = el.type === "checkbox" || el.type === "radio" ? { c: el.checked } : { v: el.value };
   });
   app.innerHTML = html;
   ultimo = html;
@@ -156,6 +161,13 @@ VISTAS.criar = () => {
           <div><label for="tempo">Segundos por pergunta</label><input id="tempo" type="number" min="5" max="300" value="${c.cfg.tempo_pergunta}" inputmode="numeric"></div>
           <div><label for="placar">Mostrar a classificação a cada</label><input id="placar" type="number" min="1" max="50" value="1" inputmode="numeric"><p class="ajuda">perguntas</p></div>
         </div>
+        <fieldset><legend>Como se formam as equipas</legend><div class="pilha">
+          <label class="modo-op"><input type="radio" name="modo" id="m_scan" value="scan" checked> <span><b>Sorteio com os telemóveis.</b> Cada jogador lê o código QR e escreve o nome.</span></label>
+          <label class="modo-op"><input type="radio" name="modo" id="m_lista" value="lista"> <span><b>Sorteio com uma lista.</b> Escreves tu os nomes de toda a gente.</span></label>
+          <label class="modo-op"><input type="radio" name="modo" id="m_livre" value="livre"> <span><b>Sem sorteio.</b> Cada equipa entra com um telemóvel e escolhe o nome.</span></label>
+        </div></fieldset>
+        <div><label for="pin">PIN do anfitrião</label><input id="pin" type="text" inputmode="numeric" maxlength="6" value="${esc(c.pin)}" autocomplete="off">
+          <p class="ajuda">Com este PIN podes controlar o jogo noutro telemóvel ou computador.</p></div>
         <label for="extra">Regras da casa</label>
         <textarea id="extra" rows="3" placeholder="Opcional. Uma regra por linha, para aparecer no ecrã das regras.">${esc(lembra("extra"))}</textarea>
         ${c.erroCriar ? `<p class="erro" role="alert">${esc(c.erroCriar)}</p>` : ""}
@@ -212,6 +224,7 @@ FORMS.folha = async (form) => {
     c.perguntas = v.boas;
     c.erros = v.erros;
     c.passo = "opcoes";
+    c.pin = c.pin || String(Math.floor(1000 + Math.random() * 9000));
     guarda("folha", url);
   } catch (e) {
     c.erro = e.message === "sem-folha"
@@ -234,6 +247,10 @@ FORMS.criar = async (form) => {
   const texto = form.querySelector("#extra").value;
   const extras = [...c.cfg.extras, ...texto.split("\n").map((s) => s.trim()).filter(Boolean)].slice(0, 8);
   guarda("extra", texto);
+  const escolhido = form.querySelector("input[name=modo]:checked");
+  const modoEquipas = escolhido ? escolhido.value : "scan";
+  const digitos = form.querySelector("#pin").value.replace(/\D/g, "");
+  const pin = digitos.length >= 4 ? digitos.slice(0, 6) : c.pin;
   c.erroCriar = ""; c.aCriar = true; pintar();
   try {
     const deck = L.fazerBaralho(c.perguntas, { ...escolhas, n });
@@ -243,13 +260,13 @@ FORMS.criar = async (form) => {
       if ((await net.read(`rooms/${codigo}/meta`)) == null) break;
     }
     const cfg = {
-      total: deck.length, tempo, placar,
+      total: deck.length, tempo, placar, modo: modoEquipas,
       pts: [c.cfg.pontos_facil, c.cfg.pontos_medio, c.cfg.pontos_dificil],
       difs: [...new Set(deck.map((q) => q.dif))].sort(),
       extras,
     };
     await net.put(`rooms/${codigo}/meta`, { hostUid: S.uid, at: net.ts() });
-    await net.put(`rooms/${codigo}/private`, { deck });
+    await net.put(`rooms/${codigo}/private`, { deck, pin });
     await net.put(`rooms/${codigo}/state`, { phase: "lobby", total: deck.length, cfg });
     guarda("sala", codigo);
     location.href = `${BASE}?sala=${codigo}&v=host`;
@@ -281,8 +298,10 @@ function painelEquipas() {
       sinal = !r ? "" : r.ok ? `<span class="sinal ok">certo, +${r.g}</span>` : r.c >= 0 ? `<span class="sinal mal">errado</span>` : `<span class="sinal">sem resposta</span>`;
     }
     const pts = e.scores && e.scores[id] ? e.scores[id].pts : 0;
-    return `<li><span class="nome">${esc(eq[id].nome)}</span>${sinal}<span class="pts">${pts}</span>
-      <button class="mini" data-act="ajustar" data-id="${esc(id)}">Pontos</button>
+    const tel = eq[id].cap ? "" : `<span class="sinal mal">sem telemóvel</span>`;
+    const trocar = eq[id].cap ? `<button class="mini" data-act="libertar" data-id="${esc(id)}">Trocar de telemóvel</button>` : "";
+    return `<li><span class="nome">${esc(eq[id].nome)}</span>${tel}${sinal}<span class="pts">${pts}</span>
+      <button class="mini" data-act="ajustar" data-id="${esc(id)}">Pontos</button>${trocar}
       <button class="mini" data-act="remover" data-id="${esc(id)}">Remover</button></li>`;
   });
   return `<section class="cartao"><h2>${plural(ids.length, "equipa", "equipas")}</h2><ul class="lista-equipas">${linhas.join("")}</ul></section>`;
@@ -291,22 +310,38 @@ function painelEquipas() {
 VISTAS.host = () => {
   if (S.meta === undefined || S.estado === undefined) return espera();
   if (S.meta === null) return semSala();
-  if (!souAnfitriao()) return mensagem("Este jogo é de outro dispositivo", "Só o telemóvel ou computador que criou a sala a pode controlar. Abre este link nesse dispositivo.");
+  if (!souAnfitriao()) {
+    return `<main class="centro"><div class="grinalda"></div><h1 class="titulo">Controlar a sala ${SALA}</h1>
+      <form class="cartao" data-form="pin">
+        <label for="pinh">PIN do anfitrião</label>
+        <input id="pinh" class="campo-codigo" type="text" inputmode="numeric" maxlength="6" autocomplete="off" required>
+        <p class="ajuda">O PIN aparece no topo do ecrã do dispositivo que criou o jogo.</p>
+        ${S.ui.erroPin ? `<p class="erro" role="alert">${esc(S.ui.erroPin)}</p>` : ""}
+        <button class="btn">Controlar este jogo</button>
+      </form></main>`;
+  }
   if (!S.estado || S.priv === undefined) return espera();
   if (!S.priv || !S.priv.deck) return mensagem("Faltam os dados do jogo", "Não foi possível recuperar as perguntas desta sala. Cria um jogo novo.", `<a class="btn" href="${esc(BASE)}?v=criar">Criar um jogo</a>`);
   const e = S.estado;
   const nEq = Object.keys(S.equipas || {}).length;
+  const nTel = Object.values(S.equipas || {}).filter((t) => t.cap).length;
   const linkEquipas = `${BASE}?sala=${SALA}`;
   let corpo = "", botoes = "";
 
   if (e.phase === "lobby") {
-    corpo = `<section class="cartao"><h1>À espera das equipas</h1>
-      <p>Abre o ecrã principal na televisão ou no projetor. As equipas entram pelo código QR que lá aparece, ou por este link:</p>
+    const textos = {
+      livre: ["À espera das equipas", "As equipas entram pelo código QR que lá aparece, ou por este link:"],
+      scan: ["À espera dos jogadores", "Cada jogador entra pelo código QR que lá aparece, ou por este link:"],
+      lista: ["Preparar as equipas", "Depois do sorteio, um telemóvel por equipa entra pelo código QR que lá aparece, ou por este link:"],
+    }[modo()];
+    corpo = `<section class="cartao"><h1>${textos[0]}</h1>
+      <p>Abre o ecrã principal na televisão ou no projetor. ${textos[1]}</p>
       <p class="link"><span>${esc(linkEquipas)}</span><button class="mini" data-act="copiar">Copiar o link</button></p></section>`;
     botoes = `<button class="btn" data-act="regras">Mostrar as regras</button>`;
   } else if (e.phase === "rules") {
     corpo = `<section class="cartao"><h1>Regras no ecrã</h1><p>Toda a gente está a ver isto. Lê em voz alta se quiseres.</p>${listaRegras(e.cfg)}</section>`;
-    botoes = `<button class="btn" data-act="comecar" ${nEq ? "" : "disabled"}>Começar o jogo</button>${nEq ? "" : `<p class="nota">Falta entrar pelo menos uma equipa.</p>`}`;
+    const falta = nEq - nTel;
+    botoes = `<button class="btn" data-act="comecar" ${nTel ? "" : "disabled"}>Começar o jogo</button>${nTel ? (falta ? `<p class="nota">${plural(falta, "equipa ainda está", "equipas ainda estão")} sem telemóvel. Pode entrar mais tarde.</p>` : "") : `<p class="nota">Falta pelo menos uma equipa com telemóvel.</p>`}`;
   } else if (e.phase === "question" || e.phase === "reveal") {
     const q = S.priv.deck[e.qNum - 1];
     const nResp = Object.keys(S.respostas || {}).length;
@@ -329,13 +364,131 @@ VISTAS.host = () => {
   }
   const meio = ["question", "reveal", "scoreboard"].includes(e.phase);
   return `<main class="coluna">
-    <header class="topo"><p class="sala">Sala <b>${SALA}</b></p><a class="btn sec peq" target="_blank" rel="noopener" href="${esc(BASE)}?sala=${SALA}&v=ecra">Abrir o ecrã principal</a></header>
+    <header class="topo"><p class="sala">Sala <b>${SALA}</b>${S.priv.pin ? `<span class="pin">PIN ${esc(S.priv.pin)}</span>` : ""}</p><a class="btn sec peq" target="_blank" rel="noopener" href="${esc(BASE)}?sala=${SALA}&v=ecra">Abrir o ecrã principal</a></header>
     ${corpo}
     <div class="acoes">${botoes}</div>
-    ${painelEquipas()}
+    ${e.phase === "lobby" && modo() !== "livre" ? painelSorteio() : painelEquipas()}
     ${meio ? `<p class="nota"><button class="ligacao" data-act="terminar">Terminar o jogo agora</button></p>` : ""}
   </main>`;
 };
+
+function painelSorteio() {
+  const eq = S.equipas || {};
+  const ids = porOrdem(eq);
+  const jog = S.jogadores || {};
+  const erro = S.ui.erroSorteio ? `<p class="erro" role="alert">${esc(S.ui.erroSorteio)}</p>` : "";
+  if (!ids.length) {
+    const lista = Object.entries(jog).sort((a, b) => (a[1].at || 0) - (b[1].at || 0));
+    const entrada = modo() === "lista"
+      ? `<label for="nomes">Nomes dos jogadores</label><textarea id="nomes" rows="6" placeholder="Um nome por linha, ou separados por vírgulas">${esc(lembra("nomes"))}</textarea>`
+      : `<h2>${lista.length ? plural(lista.length, "jogador na sala", "jogadores na sala") : "Ainda ninguém entrou"}</h2>
+         <ul class="lista-equipas">${lista.map(([u, p]) => `<li><span class="nome">${esc(p.nome)}</span><button class="mini" data-act="tirar" data-u="${esc(u)}">Remover</button></li>`).join("")}</ul>`;
+    return `<form class="cartao" data-form="sortear">${entrada}
+      <div><label for="neq">Número de equipas</label><input id="neq" type="number" min="1" max="12" value="4" inputmode="numeric"></div>
+      ${erro}<button class="btn">Sortear as equipas</button></form>`;
+  }
+  const destinos = (menos) => ids.filter((x) => x !== menos).map((x) => `<option value="${esc(x)}">${esc(eq[x].nome)}</option>`).join("");
+  const cartoes = ids.map((tid) => {
+    const t = eq[tid];
+    const linhas = membros(t).map((p, i) => {
+      const papel = !p.u ? "" : t.cap === p.u ? `<span class="sinal ok">capitão</span>` : `<button class="mini" data-act="capitao" data-id="${esc(tid)}" data-u="${esc(p.u)}">Fazer capitão</button>`;
+      return `<li><span class="nome">${esc(p.n)}</span>${papel}<select class="mini" data-mover data-id="${esc(tid)}" data-i="${i}" aria-label="Mover ${esc(p.n)}"><option value="">Mover para…</option>${destinos(tid)}<option value="__fora">Tirar do jogo</option></select></li>`;
+    }).join("");
+    return `<section class="cartao"><header class="eq-topo"><h2>${esc(t.nome)}</h2><button class="mini" data-act="renomear" data-id="${esc(tid)}">Mudar o nome</button></header>
+      <p>${t.cap ? `<span class="sinal ok">telemóvel ligado</span> <button class="mini" data-act="libertar" data-id="${esc(tid)}">Trocar de telemóvel</button>` : `<span class="sinal mal">ainda sem telemóvel</span>`}</p>
+      <ul class="lista-equipas">${linhas || `<li class="nota-escura">Sem jogadores.</li>`}</ul></section>`;
+  }).join("");
+  const dentro = new Set(ids.flatMap((tid) => membros(eq[tid]).map((p) => p.u).filter(Boolean)));
+  const fora = Object.entries(jog).filter(([u]) => !dentro.has(u));
+  const soltos = fora.length ? `<section class="cartao"><h2>Chegaram depois do sorteio</h2><ul class="lista-equipas">${fora.map(([u, p]) => `<li><span class="nome">${esc(p.nome)}</span><select class="mini" data-juntar data-u="${esc(u)}" aria-label="Juntar ${esc(p.nome)} a uma equipa"><option value="">Juntar a…</option>${destinos(null)}</select></li>`).join("")}</ul></section>` : "";
+  return `${cartoes}${soltos}${erro}<p class="nota"><button class="ligacao" data-act="ressortear">Sortear outra vez</button></p>`;
+}
+
+FORMS.pin = async (form) => {
+  const pin = form.querySelector("#pinh").value.replace(/\D/g, "");
+  try {
+    await net.put(caminho("hosts/" + S.uid), pin);
+    S.ui.erroPin = "";
+  } catch {
+    S.ui.erroPin = "PIN errado. Confirma no dispositivo que criou o jogo.";
+  }
+  pintar();
+};
+
+FORMS.sortear = async (form) => {
+  const m = modo();
+  let pessoas;
+  if (m === "lista") {
+    const txt = form.querySelector("#nomes").value;
+    guarda("nomes", txt);
+    pessoas = L.lerNomes(txt).map((n) => ({ n }));
+  } else {
+    pessoas = Object.entries(S.jogadores || {}).map(([u, p]) => ({ n: p.nome, u }));
+  }
+  const k = limita(parseInt(form.querySelector("#neq").value, 10) || 2, 1, 12);
+  if (pessoas.length < k) {
+    S.ui.erroSorteio = pessoas.length ? `Com ${plural(pessoas.length, "jogador", "jogadores")} não dá para fazer ${plural(k, "equipa", "equipas")}.` : "Ainda não há jogadores para sortear.";
+    return pintar();
+  }
+  S.ui.erroSorteio = "";
+  const nomes = L.baralhar(L.NOMES_EQUIPA).slice(0, k);
+  const equipas = {};
+  L.sortear(pessoas, k).forEach((g, i) => {
+    const t = { nome: nomes[i], ord: i, m: g };
+    if (m === "scan") t.cap = g[Math.floor(Math.random() * g.length)].u;
+    equipas["e" + (i + 1)] = t;
+  });
+  await net.put(caminho("teams"), equipas);
+  await net.patch(caminho("state"), { sorteio: net.ts() });
+};
+
+ACOES.ressortear = async () => {
+  if (!confirm("Desfazer estas equipas e sortear outra vez?")) return;
+  await net.del(caminho("teams"));
+};
+ACOES.renomear = async ({ id }) => {
+  const t = S.equipas && S.equipas[id];
+  if (!t) return;
+  const nome = (prompt("Novo nome da equipa:", t.nome) || "").replace(/\s+/g, " ").trim().slice(0, 24);
+  if (!nome) return;
+  await net.put(caminho(`teams/${id}/nome`), nome);
+};
+ACOES.libertar = async ({ id }) => {
+  const t = S.equipas && S.equipas[id];
+  if (!t || !confirm(`Desligar o telemóvel da equipa ${t.nome}? Depois, outro telemóvel pode entrar por ela.`)) return;
+  await net.del(caminho(`teams/${id}/cap`));
+};
+ACOES.capitao = ({ id, u }) => net.put(caminho(`teams/${id}/cap`), u);
+ACOES.tirar = ({ u }) => net.del(caminho("players/" + u));
+
+async function mover(sel) {
+  const { id, i } = sel.dataset;
+  const para = sel.value;
+  const eq = S.equipas || {};
+  if (!para || !eq[id]) return;
+  const de = membros(eq[id]).slice();
+  const [p] = de.splice(Number(i), 1);
+  if (!p) return;
+  const mud = { [`${id}/m`]: de };
+  if (p.u && eq[id].cap === p.u) { const outro = de.find((x) => x.u); mud[`${id}/cap`] = outro ? outro.u : null; }
+  if (para !== "__fora" && eq[para]) {
+    mud[`${para}/m`] = [...membros(eq[para]), p];
+    if (p.u && !eq[para].cap && modo() === "scan") mud[`${para}/cap`] = p.u;
+  }
+  await net.patch(caminho("teams"), mud);
+  if (para === "__fora" && p.u) await net.del(caminho("players/" + p.u));
+}
+
+async function juntar(sel) {
+  const u = sel.dataset.u;
+  const para = sel.value;
+  const eq = S.equipas || {};
+  const jog = S.jogadores && S.jogadores[u];
+  if (!para || !eq[para] || !jog) return;
+  const mud = { [`${para}/m`]: [...membros(eq[para]), { n: jog.nome, u }] };
+  if (!eq[para].cap) mud[`${para}/cap`] = u;
+  await net.patch(caminho("teams"), mud);
+}
 
 function tabela(hist, adj, ganhos) {
   const eq = S.equipas || {};
@@ -388,7 +541,8 @@ function aoResponder() {
     net.put(caminho("state/answered"), ids.length ? m : null).catch(console.error);
   }
   const eq = Object.keys(S.equipas || {});
-  if (eq.length && eq.every((id) => S.respostas[id])) setTimeout(() => revelar().catch(falha), 700);
+  const comTel = eq.filter((id) => S.equipas[id].cap);
+  if (comTel.length && comTel.every((id) => S.respostas[id])) setTimeout(() => revelar().catch(falha), 700);
 }
 
 ACOES.copiar = async () => {
@@ -443,16 +597,49 @@ VISTAS.ecra = () => {
 
   if (e.phase === "lobby") {
     const link = `${BASE}?sala=${SALA}`;
-    const nomes = Object.values(eq).sort((a, b) => (a.at || 0) - (b.at || 0));
+    const m = modo();
+    const ids = porOrdem(eq);
+    const morada = esc(link.replace(/^https?:\/\//, "").replace(/\?.*$/, ""));
+    if (m !== "livre" && ids.length) {
+      const total = ids.reduce((a, id) => a + membros(eq[id]).length, 0);
+      const anim = e.sorteio && net.now() - e.sorteio < total * 200 + 1500;
+      const falta = ids.some((id) => !eq[id].cap);
+      const cartoes = ids.map((id, i) => {
+        const t = eq[id];
+        return `<section class="e-equipa cor${i % 5}"><h2>${esc(t.nome)}</h2>
+          <ul>${membros(t).map((p, j) => `<li style="animation-delay:${((j * ids.length + i) * 0.2).toFixed(1)}s">${esc(p.n)}${p.u && t.cap === p.u ? ` <span class="cap">capitão</span>` : ""}</li>`).join("")}</ul>
+          <p class="e-estado">${t.cap ? "telemóvel ligado" : "à espera do telemóvel"}</p></section>`;
+      }).join("");
+      const instr = m === "scan"
+        ? "O capitão de cada equipa já tem a equipa no telemóvel. É nele que se responde."
+        : "Um telemóvel por equipa: leiam o código e escolham a vossa equipa.";
+      return `<div class="grinalda"></div><main class="e-sorteio ${anim ? "anim" : ""}">
+        <header class="e-s-topo"><div><h1 class="titulo">Equipas</h1><p class="passo">${instr}</p></div>
+          ${m === "lista" && falta ? `<div class="e-s-qr"><div class="qr">${qrSvg(link)}</div><p class="codigo">${SALA}</p></div>` : ""}</header>
+        <div class="e-grelha">${cartoes}</div></main>`;
+    }
+    if (m === "lista") {
+      return `<div class="grinalda"></div><main class="e-regras"><h1 class="logo">${esc(NOME_DO_JOGO)}</h1>
+        <p class="passo largo">As equipas vão ser sorteadas daqui a nada. Fiquem de olho neste ecrã.</p></main>`;
+    }
+    const gente = m === "scan" ? Object.values(S.jogadores || {}) : Object.values(eq);
+    const nomes = gente.sort((a, b) => (a.at || 0) - (b.at || 0));
+    const n = nomes.length;
+    const passo = m === "scan"
+      ? "Cada jogador aponta a câmara do telemóvel ao código e escreve o nome."
+      : "Aponta a câmara do telemóvel ao código. Só é preciso um telemóvel por equipa.";
+    const conta = m === "scan"
+      ? (n ? plural(n, "jogador na sala", "jogadores na sala") : "À espera do primeiro jogador")
+      : (n ? plural(n, "equipa na sala", "equipas na sala") : "À espera da primeira equipa");
     return `<div class="grinalda"></div><main class="e-lobby">
       <div class="e-entrar">
         <h1 class="logo">${esc(NOME_DO_JOGO)}</h1>
-        <p class="passo">Aponta a câmara do telemóvel ao código. Só é preciso um telemóvel por equipa.</p>
-        <p class="passo">Ou abre <b>${esc(link.replace(/^https?:\/\//, "").replace(/\?.*$/, ""))}</b> e escreve</p>
+        <p class="passo">${passo}</p>
+        <p class="passo">Ou abre <b>${morada}</b> e escreve</p>
         <p class="codigo">${SALA}</p>
       </div>
       <div class="qr">${qrSvg(link)}</div>
-      <section class="e-equipas"><h2>${nEq ? plural(nEq, "equipa na sala", "equipas na sala") : "À espera da primeira equipa"}</h2>
+      <section class="e-equipas"><h2>${conta}</h2>
         <ul>${nomes.map((t) => `<li>${esc(t.nome)}</li>`).join("")}</ul></section>
     </main>`;
   }
@@ -490,28 +677,71 @@ VISTAS.ecra = () => {
 
 // ---------- Equipa (telemóvel do capitão) ----------
 
-VISTAS.equipa = () => {
-  if (S.meta === undefined || S.estado === undefined || S.equipas === undefined) return espera();
-  if (S.meta === null || !S.estado) return semSala();
-  const e = S.estado;
-  const eu = S.equipas[S.uid];
-  if (!eu) {
-    if (e.phase === "final") return mensagem("Este jogo já acabou", "Pede ao anfitrião o código do próximo jogo.");
-    return `<main class="centro"><div class="grinalda"></div><h1 class="logo peq">${esc(NOME_DO_JOGO)}</h1>
+function semEquipa(e) {
+  const m = modo();
+  const eq = S.equipas;
+  const ids = porOrdem(eq);
+  const erro = S.ui.erroNome ? `<p class="erro" role="alert">${esc(S.ui.erroNome)}</p>` : "";
+  const acabou = () => mensagem("Este jogo já acabou", "Pede ao anfitrião o código do próximo jogo.");
+  const ficha = (corpo) => `<main class="centro"><div class="grinalda"></div>${corpo}</main>`;
+  if (m === "livre") {
+    if (e.phase === "final") return acabou();
+    return ficha(`<h1 class="logo peq">${esc(NOME_DO_JOGO)}</h1>
       <form class="cartao" data-form="juntar">
         <label for="nome">Nome da equipa</label>
         <input id="nome" maxlength="24" autocomplete="off" required placeholder="Os Imbatíveis">
         <p class="ajuda">Este telemóvel fica a ser o da equipa. É nele que se responde.</p>
-        ${S.ui.erroNome ? `<p class="erro" role="alert">${esc(S.ui.erroNome)}</p>` : ""}
-        <button class="btn">Entrar na sala ${SALA}</button>
-      </form></main>`;
+        ${erro}<button class="btn">Entrar na sala ${SALA}</button>
+      </form>`);
   }
-  const meu = e.scores && e.scores[S.uid];
+  if (m === "scan") {
+    if (S.jogadores === undefined) return espera();
+    const eu = S.jogadores[S.uid];
+    if (!eu) {
+      if (e.phase === "final") return acabou();
+      return ficha(`<h1 class="logo peq">${esc(NOME_DO_JOGO)}</h1>
+        <form class="cartao" data-form="jogador">
+          <label for="nome">O teu nome</label>
+          <input id="nome" maxlength="24" autocomplete="off" required placeholder="Maria">
+          <p class="ajuda">${ids.length ? "As equipas já foram sorteadas. O anfitrião junta-te a uma delas." : "As equipas são sorteadas quando toda a gente tiver entrado."}</p>
+          ${erro}<button class="btn">Entrar na sala ${SALA}</button>
+        </form>`);
+    }
+    if (!ids.length) return ficha(`<h1 class="titulo">Olá, ${esc(eu.nome)}!</h1><p class="nota">Já estás na lista. As equipas vão ser sorteadas no ecrã principal.</p>`);
+    const minha = ids.find((id) => membros(eq[id]).some((p) => p.u === S.uid));
+    if (!minha) return ficha(`<h1 class="titulo">Ainda sem equipa</h1><p class="nota">Pede ao anfitrião para te juntar a uma equipa.</p>`);
+    const t = eq[minha];
+    const cap = membros(t).find((p) => p.u === t.cap);
+    return ficha(`<p class="nota">A tua equipa</p><h1 class="titulo">${esc(t.nome)}</h1><p>${membros(t).map((p) => esc(p.n)).join(", ")}</p>
+      ${t.cap ? `<p class="nota">As respostas dão-se no telemóvel de ${cap ? esc(cap.n) : "outro jogador"}. Podes guardar o teu.</p>`
+        : `<p class="nota">A equipa está sem telemóvel para responder.</p>${erro}<button class="btn" data-act="reclamar" data-id="${esc(minha)}">Responder com este telemóvel</button>`}`);
+  }
+  if (!ids.length) return ficha(`<h1 class="titulo">Falta o sorteio</h1><p class="nota">As equipas ainda não foram sorteadas. Este ecrã atualiza sozinho.</p>`);
+  const livres = ids.some((id) => !eq[id].cap);
+  const cartoes = ids.map((id) => {
+    const t = eq[id];
+    return `<section class="cartao"><h2>${esc(t.nome)}</h2><p>${membros(t).map((p) => esc(p.n)).join(", ")}</p>
+      ${t.cap ? `<p class="nota-escura">Já tem telemóvel.</p>` : `<button class="btn" data-act="reclamar" data-id="${esc(id)}">Somos esta equipa</button>`}</section>`;
+  }).join("");
+  return `<main class="coluna"><h1 class="titulo">Qual é a vossa equipa?</h1>
+    <p class="nota">${livres ? "Este telemóvel fica a ser o da equipa. É nele que se responde." : "Todas as equipas já têm telemóvel. Se o vosso deixou de funcionar, falem com o anfitrião."}</p>${erro}${cartoes}</main>`;
+}
+
+VISTAS.equipa = () => {
+  if (S.meta === undefined || S.estado === undefined || S.equipas === undefined) return espera();
+  if (S.meta === null || !S.estado) return semSala();
+  const e = S.estado;
+  const tid = minhaEquipa();
+  const eu = tid && S.equipas[tid];
+  if (!eu) return semEquipa(e);
+  const meu = e.scores && e.scores[tid];
   const rodape = `<footer class="q-rodape"><span class="nome">${esc(eu.nome)}</span><span class="pts">${meu ? meu.pts : 0} pontos</span></footer>`;
   let corpo;
 
   if (e.phase === "lobby") {
-    corpo = `<h1 class="titulo">Estão dentro!</h1><p class="nota">Juntem a equipa à volta deste telemóvel. O jogo começa quando o anfitrião quiser.</p>`;
+    const gente = membros(eu).map((p) => p.n);
+    corpo = `<h1 class="titulo">Estão dentro!</h1>${gente.length ? `<p class="grande">${esc(eu.nome)}</p><p>${gente.map(esc).join(", ")}</p>` : ""}
+      <p class="nota">Este é o telemóvel da equipa. Juntem-se à volta dele: o jogo começa quando o anfitrião quiser.</p>`;
   } else if (e.phase === "rules") {
     corpo = `<h1 class="titulo">Regras</h1>${listaRegras(e.cfg)}`;
   } else if (e.phase === "question") {
@@ -525,15 +755,15 @@ VISTAS.equipa = () => {
         <div class="q-opcoes">${e.q.opcoes.map((o, i) => `<button class="op op${i}" data-act="responder" data-i="${i}"><span class="letra">${LETRAS[i]}</span><span class="txt">${esc(o)}</span></button>`).join("")}</div>`;
     }
   } else if (e.phase === "reveal") {
-    const r = e.reveal && e.reveal.res && e.reveal.res[S.uid];
+    const r = e.reveal && e.reveal.res && e.reveal.res[tid];
     const certa = e.reveal ? e.q.opcoes[e.reveal.correta] : "";
     if (!r) corpo = `<h1 class="titulo">Entraram a meio</h1><p class="nota">Contam a partir da próxima pergunta.</p>`;
     else if (r.ok) corpo = `<h1 class="titulo bom">Certo!</h1><p class="grande">+${r.g} pontos</p>`;
     else corpo = `<h1 class="titulo mau">${r.c >= 0 ? "Errado" : "Sem resposta"}</h1><p class="nota">A resposta certa era:</p><p class="grande">${esc(certa)}</p>`;
   } else if (e.phase === "scoreboard") {
-    corpo = `<h1 class="titulo">${meu ? `${meu.pos}.º lugar` : "Classificação"}</h1>${listaPontos(e.scores, S.uid)}`;
+    corpo = `<h1 class="titulo">${meu ? `${meu.pos}.º lugar` : "Classificação"}</h1>${listaPontos(e.scores, tid)}`;
   } else {
-    corpo = `<h1 class="titulo">${meu ? `Ficaram em ${meu.pos}.º lugar` : "Fim do jogo"}</h1>${meu && meu.pos === 1 ? `<p class="grande">Parabéns, campeões!</p>` : ""}${listaPontos(e.scores, S.uid)}`;
+    corpo = `<h1 class="titulo">${meu ? `Ficaram em ${meu.pos}.º lugar` : "Fim do jogo"}</h1>${meu && meu.pos === 1 ? `<p class="grande">Parabéns, campeões!</p>` : ""}${listaPontos(e.scores, tid)}`;
   }
   return `<main class="q-ecra">${corpo}</main>${rodape}`;
 };
@@ -545,7 +775,7 @@ FORMS.juntar = async (form) => {
   if (repetido) { S.ui.erroNome = "Já há uma equipa com esse nome. Escolham outro."; return pintar(); }
   S.ui.erroNome = "";
   try {
-    await net.put(caminho("teams/" + S.uid), { nome, at: net.ts() });
+    await net.put(caminho("teams/" + S.uid), { nome, cap: S.uid, at: net.ts() });
   } catch (e) {
     console.error(e);
     S.ui.erroNome = "Não deu para entrar. Verifica a ligação à internet e tenta outra vez.";
@@ -553,14 +783,38 @@ FORMS.juntar = async (form) => {
   }
 };
 
+FORMS.jogador = async (form) => {
+  const nome = form.querySelector("#nome").value.replace(/\s+/g, " ").trim().slice(0, 24);
+  if (!nome) return;
+  S.ui.erroNome = "";
+  try {
+    await net.put(caminho("players/" + S.uid), { nome, at: net.ts() });
+  } catch (e) {
+    console.error(e);
+    S.ui.erroNome = "Não deu para entrar. Verifica a ligação à internet e tenta outra vez.";
+    pintar();
+  }
+};
+
+ACOES.reclamar = async ({ id }) => {
+  S.ui.erroNome = "";
+  try {
+    await net.put(caminho(`teams/${id}/cap`), S.uid);
+  } catch {
+    S.ui.erroNome = "Outro telemóvel foi mais rápido. Escolham outra equipa ou falem com o anfitrião.";
+    pintar();
+  }
+};
+
 ACOES.responder = async ({ i }) => {
   const e = S.estado;
-  if (!e || e.phase !== "question" || (S.minha && S.minha.key === e.qKey)) return;
+  const tid = minhaEquipa();
+  if (!e || !tid || e.phase !== "question" || (S.minha && S.minha.key === e.qKey)) return;
   const k = e.qKey;
   S.minha = { key: k, c: Number(i), pendente: true };
   pintar();
   try {
-    await net.put(caminho(`answers/${k}/${S.uid}`), { c: Number(i), at: net.ts() });
+    await net.put(caminho(`answers/${k}/${tid}`), { c: Number(i), at: net.ts() });
     if (S.minha && S.minha.key === k) S.minha.pendente = false;
   } catch {
     if (S.minha && S.minha.key === k) S.minha = null;
@@ -594,9 +848,11 @@ let chaveResp = null;
 
 function aoEstado() {
   const e = S.estado;
-  const k = (e && e.phase !== "lobby" && e.phase !== "rules" && e.qKey) || null;
+  const q = (e && e.phase !== "lobby" && e.phase !== "rules" && e.qKey) || null;
   if (VISTA === "host" && !souAnfitriao()) return;
   if (VISTA !== "host" && VISTA !== "equipa") return;
+  const tid = VISTA === "equipa" ? minhaEquipa() : "";
+  const k = q && (VISTA === "host" || tid) ? `${q}/${tid}` : null;
   if (k === chaveResp) return;
   if (cancelaResp) cancelaResp();
   cancelaResp = null;
@@ -604,16 +860,16 @@ function aoEstado() {
   S.respostas = null; S.respKey = null; S.minha = null;
   if (!k) return;
   if (VISTA === "host") {
-    cancelaResp = net.watch(caminho("answers/" + k), (v) => {
+    cancelaResp = net.watch(caminho("answers/" + q), (v) => {
       if (chaveResp !== k) return;
-      S.respostas = v || {}; S.respKey = k;
+      S.respostas = v || {}; S.respKey = q;
       aoResponder();
       pintar();
     });
   } else {
-    cancelaResp = net.watch(caminho(`answers/${k}/${S.uid}`), (v) => {
+    cancelaResp = net.watch(caminho(`answers/${q}/${tid}`), (v) => {
       if (chaveResp !== k) return;
-      if (v && typeof v.c === "number") S.minha = { key: k, c: v.c };
+      if (v && typeof v.c === "number") S.minha = { key: q, c: v.c };
       pintar();
     });
   }
@@ -638,7 +894,12 @@ app.addEventListener("submit", (ev) => {
   const f = FORMS[ev.target.dataset.form];
   if (f) Promise.resolve().then(() => f(ev.target)).catch(falha);
 });
-app.addEventListener("change", () => { if (VISTA === "criar") atualizarDisponiveis(); });
+app.addEventListener("change", (ev) => {
+  if (VISTA === "criar") atualizarDisponiveis();
+  const t = ev.target;
+  if (t.matches && t.matches("select[data-mover]")) mover(t).catch(falha);
+  else if (t.matches && t.matches("select[data-juntar]")) juntar(t).catch(falha);
+});
 app.addEventListener("input", (ev) => {
   if (ev.target.id === "cod") ev.target.value = ev.target.value.toUpperCase().replace(/[^A-Z]/g, "");
 });
@@ -664,17 +925,16 @@ async function arrancar() {
   if (VISTA === "inicio" || VISTA === "criar") { desenhar(); return; }
 
   let privLigado = false;
-  net.watch(caminho("meta"), (v) => {
-    S.meta = v;
-    if (VISTA === "host" && souAnfitriao() && !privLigado) {
-      privLigado = true;
-      net.watch(caminho("private"), (p) => { S.priv = p; pintar(); });
-    }
-    aoEstado();
-    pintar();
-  });
+  const ligaPriv = () => {
+    if (VISTA !== "host" || !souAnfitriao() || privLigado) return;
+    privLigado = true;
+    net.watch(caminho("private"), (p) => { S.priv = p; pintar(); });
+  };
+  net.watch(caminho("meta"), (v) => { S.meta = v; ligaPriv(); aoEstado(); pintar(); });
+  if (VISTA === "host") net.watch(caminho("hosts/" + S.uid), (v) => { S.hostExtra = !!v; ligaPriv(); aoEstado(); pintar(); });
+  net.watch(caminho("players"), (v) => { S.jogadores = v || {}; pintar(); });
   net.watch(caminho("state"), (v) => { S.estado = v; aoEstado(); pintar(); });
-  net.watch(caminho("teams"), (v) => { S.equipas = v || {}; if (VISTA === "host") aoResponder(); pintar(); });
+  net.watch(caminho("teams"), (v) => { S.equipas = v || {}; aoEstado(); if (VISTA === "host") aoResponder(); pintar(); });
   setInterval(tique, 200);
   manterAcordado();
 }

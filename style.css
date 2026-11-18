@@ -209,6 +209,13 @@ textarea { resize: vertical; }
 .lista-equipas .nome { flex: 1 1 8rem; font-weight: 700; overflow-wrap: anywhere; }
 .lista-equipas .pts { font-family: var(--titulos); min-width: 3ch; text-align: right; }
 
+.pilha { display: flex; flex-direction: column; gap: 0.5rem; }
+.modo-op { display: flex; gap: 0.6rem; align-items: flex-start; font-weight: 400; background: #fff; border: 2px solid var(--tinta); border-radius: 12px; padding: 0.55rem 0.75rem; cursor: pointer; }
+.modo-op input { width: 1.15rem; height: 1.15rem; margin-top: 0.2rem; accent-color: var(--tinta); flex: none; }
+.pin { margin-left: 0.9rem; font-size: 0.95rem; color: var(--suave); white-space: nowrap; }
+select.mini { max-width: 9.5rem; }
+.eq-topo { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; flex-wrap: wrap; }
+
 /* ---------- Telemóvel da equipa ---------- */
 
 .q-ecra { width: min(100%, 34rem); margin: 0 auto; padding: 1.25rem 1rem 5.5rem; display: flex; flex-direction: column; gap: 1rem; }
@@ -239,6 +246,27 @@ textarea { resize: vertical; }
 .e-equipas h2 { font-family: var(--titulos); font-weight: 400; font-size: 1.5rem; color: var(--suave); margin-bottom: 0.6rem; }
 .e-equipas ul { display: flex; flex-wrap: wrap; gap: 0.6rem; }
 .e-equipas li { background: var(--papel); color: var(--tinta); font-weight: 700; font-size: 1.2rem; border-radius: 999px; padding: 0.3rem 1.1rem; }
+
+.passo.largo { max-width: 40rem; margin: 0 auto; text-align: center; font-size: 1.6rem; }
+.e-regras .logo { text-align: center; font-size: 4.6rem; margin-top: 4rem; }
+
+.e-s-topo { display: flex; align-items: center; justify-content: space-between; gap: 2rem; }
+.e-s-topo .titulo { text-align: left; }
+.e-s-topo .passo { max-width: 34rem; }
+.e-s-qr { display: flex; align-items: center; gap: 1.2rem; flex: none; }
+.e-s-qr .qr { width: 9.5rem; }
+.e-s-qr .codigo { font-size: 3.2rem; }
+.e-grelha { display: grid; grid-template-columns: repeat(auto-fit, minmax(12.5rem, 1fr)); gap: 1rem; align-items: start; }
+.e-equipa { background: var(--papel); color: var(--tinta); border-radius: var(--raio); border-top: 0.6rem solid var(--amarelo); padding: 0.8rem 1rem 0.9rem; }
+.e-equipa.cor0 { border-top-color: var(--cravo); }
+.e-equipa.cor2 { border-top-color: var(--verde); }
+.e-equipa.cor3 { border-top-color: var(--azul); }
+.e-equipa.cor4 { border-top-color: var(--rosa); }
+.e-equipa h2 { font-family: var(--titulos); font-weight: 400; font-size: 1.5rem; line-height: 1.1; margin-bottom: 0.4rem; }
+.e-equipa li { font-size: 1.15rem; font-weight: 700; padding: 0.1rem 0; }
+.e-equipa .cap { font-size: 0.75em; font-weight: 400; background: var(--amarelo); border-radius: 999px; padding: 0 0.5em; }
+.e-estado { margin-top: 0.5rem; font-size: 0.9rem; color: #555a85; }
+.e-sorteio.anim .e-equipa li { animation: sobe 0.45s ease-out both; }
 
 .e-regras .regras { font-size: 1.55rem; gap: 1rem; max-width: 46rem; margin: 0 auto; }
 
@@ -274,7 +302,7 @@ textarea { resize: vertical; }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .degrau, .resto { animation: none; }
+  .degrau, .resto, .e-sorteio.anim .e-equipa li { animation: none; }
   .barra { transition: none; }
   .btn:active, .q-opcoes .op:active { transform: none; }
 }

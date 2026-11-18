@@ -234,3 +234,21 @@ export function regras(cfg) {
   for (const e of cfg.extras || []) if (e) r.push(e);
   return r;
 }
+
+// ---------- Sorteio de equipas ----------
+
+export const NOMES_EQUIPA = [
+  "Sardinhas", "Pastéis de Nata", "Galos de Barcelos", "Francesinhas", "Bifanas", "Tremoços", "Bolas de Berlim",
+  "Caracóis", "Manjericos", "Bacalhaus", "Alheiras", "Azulejos", "Cravos", "Ovos Moles",
+];
+
+export function lerNomes(texto) {
+  return String(texto || "").split(/[\n,;]+/).map((s) => s.replace(/\s+/g, " ").trim().slice(0, 24)).filter(Boolean);
+}
+
+// Baralha as pessoas e distribui-as como cartas, para as equipas ficarem equilibradas.
+export function sortear(pessoas, k, rng = Math.random) {
+  const grupos = Array.from({ length: k }, () => []);
+  baralhar(pessoas, rng).forEach((p, i) => grupos[i % k].push(p));
+  return grupos;
+}
