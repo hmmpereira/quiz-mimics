@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="pt-PT">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#1c2460">
+  <title>Quiz &amp; Mímica</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Atkinson+Hyperlegible:wght@400;700&family=Lilita+One&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div id="aviso" role="status" hidden></div>
+  <div id="app"><main class="centro"><p class="espera">A ligar ao jogo…</p></main></div>
+  <noscript><p class="espera">Este jogo precisa de JavaScript ligado no navegador.</p></noscript>
+  <script type="module" src="app.js" onerror="document.getElementById('app').innerHTML='<main class=centro><p class=espera>Não foi possível carregar o jogo. Verifica a internet e recarrega a página.</p></main>'"></script>
+</body>
+</html>
