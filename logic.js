@@ -57,6 +57,11 @@ export const CFG_PADRAO = {
   pontos_medio: 150,
   pontos_dificil: 200,
   tempo_pergunta: 20,
+  bonus_velocidade_max: 50,
+  multiplicador_bonus: 2,
+  joker_certo: 2,
+  joker_errado: -50,
+  tempo_joker: 8,
 };
 
 export function lerConfig(tab) {
@@ -68,7 +73,9 @@ export function lerConfig(tab) {
     if (!k || v == null || v === "") continue;
     if (k.startsWith("regra_extra")) { cfg.extras.push(v); continue; }
     const num = Number(String(v).replace(",", "."));
-    if (Number.isFinite(num) && k in CFG_PADRAO && num > 0) cfg[k] = num;
+    if (!Number.isFinite(num) || !(k in CFG_PADRAO)) continue;
+    if (k === "joker_errado") cfg[k] = -Math.abs(num);
+    else if (num > 0 || (k === "bonus_velocidade_max" && num === 0)) cfg[k] = num;
   }
   return cfg;
 }
@@ -110,7 +117,13 @@ export function validarPerguntas(tab) {
       if (!Number.isFinite(tempo) || tempo < 5 || tempo > 300) { erro("o tempo tem de ser um número entre 5 e 300 segundos"); continue; }
       tempo = Math.round(tempo);
     }
+    let media = null;
+    if (c.media) {
+      media = mediaDe(c.media);
+      if (!media) { erro("o link em media tem de acabar em .jpg, .png, .gif, .webp, .mp3, .m4a, .ogg ou .wav"); continue; }
+    }
     boas.push({
+      media,
       linha: l.n,
       tema: c.tema || "Geral",
       dif,
@@ -123,6 +136,15 @@ export function validarPerguntas(tab) {
     });
   }
   return { boas, erros };
+}
+
+// Diz se um link é de imagem ou de som, pela terminação do ficheiro.
+export function mediaDe(link) {
+  const u = String(link || "").trim();
+  const fim = u.split(/[?#]/)[0].toLowerCase();
+  if (/\.(jpe?g|png|gif|webp|svg)$/.test(fim)) return { t: "img", u };
+  if (/\.(mp3|m4a|aac|ogg|oga|wav)$/.test(fim)) return { t: "aud", u };
+  return null;
 }
 
 export function baralhar(lista, rng = Math.random) {
@@ -149,7 +171,7 @@ export function fazerBaralho(perguntas, opts, rng = Math.random) {
       opcoes = baralhar([q.certa, ...q.erradas], rng);
       correta = opcoes.indexOf(q.certa);
     }
-    return { tema: q.tema, dif: q.dif, tipo: q.tipo, texto: q.texto, opcoes, correta, bonus: !!q.bonus, tempo: q.tempo || 0 };
+    return { tema: q.tema, dif: q.dif, tipo: q.tipo, texto: q.texto, opcoes, correta, bonus: !!q.bonus, tempo: q.tempo || 0, media: q.media || null };
   });
 }
 
@@ -158,7 +180,8 @@ export function pontos(dif, pts) {
 }
 
 // Resultado de uma pergunta para cada equipa. As horas vêm do servidor.
-export function pontuar({ correta, pts, respostas, equipas, inicio, duracao, folga = 1500 }) {
+// g = pontos ganhos (ou perdidos), v = parte da rapidez, x = multiplicador, j = jogou o joker.
+export function pontuar({ correta, pts, respostas, equipas, inicio, duracao, folga = 1500, velMax = 0, mult = 1, jokers = {}, jokerCerto = 2, jokerErrado = -50 }) {
   const res = {};
   const limite = duracao * 1000;
   for (const id of Object.keys(equipas || {})) {
@@ -172,7 +195,16 @@ export function pontuar({ correta, pts, respostas, equipas, inicio, duracao, fol
         t = Math.max(0, Math.min(dt, limite));
       }
     }
-    res[id] = { c, ok, g: ok ? pts : 0, t };
+    const j = !!jokers[id];
+    let v = 0, x = 1, g = 0;
+    if (ok) {
+      v = Math.round(velMax * (1 - t / limite));
+      x = mult * (j ? jokerCerto : 1);
+      g = (pts + v) * x;
+    } else if (j) {
+      g = jokerErrado;
+    }
+    res[id] = { c, ok, g, t, j, v, x };
   }
   return res;
 }
@@ -229,6 +261,9 @@ export function regras(cfg) {
     r.push(`Uma resposta certa vale ${partes.join(", ").replace(" nas ", " pontos nas perguntas ")} e ${ultima}.`);
   }
   r.push("Resposta errada ou fora de tempo vale 0 pontos.");
+  if (cfg.vel) r.push(`Quem acerta mais depressa ganha até ${cfg.vel} pontos extra.`);
+  if (cfg.tem2x) r.push("Algumas perguntas valem a dobrar. O ecrã avisa antes.");
+  if (cfg.joker) r.push(`Cada equipa tem um joker para o jogo inteiro. Joga-se antes de ver a pergunta: se acertarem, os pontos contam a dobrar; se errarem, perdem ${Math.abs(cfg.joker.errado)} pontos.`);
   r.push(cfg.placar === 1 ? "A classificação aparece depois de cada pergunta." : `A classificação aparece a cada ${cfg.placar} perguntas.`);
   r.push("Em caso de empate, fica à frente a equipa que respondeu mais depressa.");
   for (const e of cfg.extras || []) if (e) r.push(e);

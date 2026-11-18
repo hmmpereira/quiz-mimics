@@ -1,4 +1,5 @@
-// Quiz & Mímica, fases 1 e 2: sala, entrada por QR, sorteio de equipas, perguntas, relógio, pontos e classificação.
+// Quiz & Mímica, fases 1 a 3: sala, entrada por QR, sorteio de equipas, perguntas com imagem e som,
+// relógio, bónus de rapidez, perguntas a dobrar, joker, pontos e classificação.
 
 import * as net from "./net.js";
 import { lerFolha } from "./sheet.js";
@@ -21,7 +22,7 @@ const DIFS = { 1: "Fácil", 2: "Média", 3: "Difícil" };
 // undefined = ainda a carregar; null = não existe.
 const S = {
   uid: null, meta: undefined, estado: undefined, equipas: undefined, priv: undefined,
-  jogadores: undefined, hostExtra: false,
+  jogadores: undefined, hostExtra: false, jokers: {},
   respostas: null, respKey: null, minha: null,
   ui: { criar: { passo: "folha" } },
 };
@@ -33,6 +34,9 @@ const modo = () => (S.estado && S.estado.cfg && S.estado.cfg.modo) || "livre";
 const minhaEquipa = () => Object.keys(S.equipas || {}).find((id) => S.equipas[id].cap === S.uid) || null;
 const porOrdem = (eq) => Object.keys(eq || {}).sort((a, b) => (eq[a].ord ?? 99) - (eq[b].ord ?? 99) || (eq[a].at || 0) - (eq[b].at || 0));
 const membros = (t) => (t && t.m) || [];
+const tempoAcabou = () => { const e = S.estado; return !!(e && e.startedAt && net.now() >= e.startedAt + e.duracao * 1000); };
+const jokersDaPergunta = () => { const e = S.estado; return Object.keys(S.jokers).filter((id) => S.jokers[id] === e.qKey && S.equipas && S.equipas[id]); };
+const nomesJoker = () => jokersDaPergunta().map((id) => S.equipas[id].nome);
 const limita = (v, min, max) => Math.max(min, Math.min(max, v));
 const plural = (n, um, varios) => `${n} ${n === 1 ? um : varios}`;
 
@@ -51,6 +55,7 @@ function pintar() {
 }
 
 function desenhar() {
+  gerirSom();
   const html = VISTAS[VISTA]();
   if (html === ultimo) { tique(); return; }
   // Guarda o que a pessoa já escreveu, para não se perder ao redesenhar.
@@ -91,7 +96,7 @@ function mensagem(titulo, texto, botao = `<a class="btn" href="${esc(BASE)}">Vol
 const semSala = () => mensagem("Sala não encontrada", `Não existe nenhum jogo com o código ${SALA}. Confirma as quatro letras no ecrã principal.`);
 
 function etiquetas(e) {
-  return `<p class="etiquetas"><span class="etq forte">Pergunta ${e.qNum} de ${e.total}</span><span class="etq">${esc(e.q.tema)}</span><span class="etq">${DIFS[e.q.dif]}</span><span class="etq">${e.q.pts} pontos</span></p>`;
+  return `<p class="etiquetas"><span class="etq forte">Pergunta ${e.qNum} de ${e.total}</span><span class="etq">${esc(e.q.tema)}</span><span class="etq">${DIFS[e.q.dif]}</span><span class="etq">${e.q.pts} pontos</span>${e.q.bonus ? `<span class="etq dobro">Vale a dobrar</span>` : ""}</p>`;
 }
 
 const relogio = () => `<div class="tempo"><div class="trilho"><div class="barra" data-barra></div></div><b class="seg" data-seg></b></div>`;
@@ -101,7 +106,7 @@ function listaPontos(scores, destaque) {
     let mov = "";
     if (s.ant && s.ant > s.pos) mov = `<span class="mov sobe" title="Subiu ${s.ant - s.pos}">▲ ${s.ant - s.pos}</span>`;
     else if (s.ant && s.ant < s.pos) mov = `<span class="mov desce" title="Desceu ${s.pos - s.ant}">▼ ${s.pos - s.ant}</span>`;
-    return `<li class="${s.id === destaque ? "eu" : ""}"><span class="pos">${s.pos}.º</span><span class="nome">${esc(s.nome)}</span>${mov}${s.g ? `<span class="ganho">+${s.g}</span>` : ""}<span class="pts">${s.pts}</span></li>`;
+    return `<li class="${s.id === destaque ? "eu" : ""}"><span class="pos">${s.pos}.º</span><span class="nome">${esc(s.nome)}</span>${mov}${s.g ? `<span class="ganho ${s.g < 0 ? "perde" : ""}">${s.g > 0 ? "+" : ""}${s.g}</span>` : ""}<span class="pts">${s.pts}</span></li>`;
   });
   return linhas.length ? `<ol class="placar">${linhas.join("")}</ol>` : `<p class="nota">Ainda não há pontos.</p>`;
 }
@@ -161,6 +166,10 @@ VISTAS.criar = () => {
           <div><label for="tempo">Segundos por pergunta</label><input id="tempo" type="number" min="5" max="300" value="${c.cfg.tempo_pergunta}" inputmode="numeric"></div>
           <div><label for="placar">Mostrar a classificação a cada</label><input id="placar" type="number" min="1" max="50" value="1" inputmode="numeric"><p class="ajuda">perguntas</p></div>
         </div>
+        <fieldset><legend>Bónus</legend><div class="pilha">
+          <label class="modo-op"><input type="checkbox" id="b_vel" checked> <span><b>Rapidez.</b> Quem acerta mais depressa ganha até ${c.cfg.bonus_velocidade_max} pontos extra.</span></label>
+          <label class="modo-op"><input type="checkbox" id="b_joker" checked> <span><b>Joker.</b> Cada equipa pode apostar uma vez, antes de ver a pergunta: a dobrar se acertar, menos ${Math.abs(c.cfg.joker_errado)} pontos se errar.</span></label>
+        </div></fieldset>
         <fieldset><legend>Como se formam as equipas</legend><div class="pilha">
           <label class="modo-op"><input type="radio" name="modo" id="m_scan" value="scan" checked> <span><b>Sorteio com os telemóveis.</b> Cada jogador lê o código QR e escreve o nome.</span></label>
           <label class="modo-op"><input type="radio" name="modo" id="m_lista" value="lista"> <span><b>Sorteio com uma lista.</b> Escreves tu os nomes de toda a gente.</span></label>
@@ -247,6 +256,8 @@ FORMS.criar = async (form) => {
   const texto = form.querySelector("#extra").value;
   const extras = [...c.cfg.extras, ...texto.split("\n").map((s) => s.trim()).filter(Boolean)].slice(0, 8);
   guarda("extra", texto);
+  const comRapidez = form.querySelector("#b_vel").checked;
+  const comJoker = form.querySelector("#b_joker").checked;
   const escolhido = form.querySelector("input[name=modo]:checked");
   const modoEquipas = escolhido ? escolhido.value : "scan";
   const digitos = form.querySelector("#pin").value.replace(/\D/g, "");
@@ -254,6 +265,7 @@ FORMS.criar = async (form) => {
   c.erroCriar = ""; c.aCriar = true; pintar();
   try {
     const deck = L.fazerBaralho(c.perguntas, { ...escolhas, n });
+    deck.forEach((q) => { if (q.media) q.media = { t: q.media.t, u: new URL(q.media.u, BASE).href }; });
     let codigo = "";
     for (let i = 0; i < 8; i++) {
       codigo = L.novoCodigo();
@@ -261,6 +273,11 @@ FORMS.criar = async (form) => {
     }
     const cfg = {
       total: deck.length, tempo, placar, modo: modoEquipas,
+      vel: comRapidez ? c.cfg.bonus_velocidade_max : 0,
+      mult: c.cfg.multiplicador_bonus,
+      joker: comJoker ? { certo: c.cfg.joker_certo, errado: c.cfg.joker_errado, tempo: c.cfg.tempo_joker } : null,
+      tem2x: deck.some((q) => q.bonus),
+      audio: deck.some((q) => q.media && q.media.t === "aud"),
       pts: [c.cfg.pontos_facil, c.cfg.pontos_medio, c.cfg.pontos_dificil],
       difs: [...new Set(deck.map((q) => q.dif))].sort(),
       extras,
@@ -295,8 +312,10 @@ function painelEquipas() {
       sinal = S.respostas && S.respostas[id] ? `<span class="sinal ok">respondeu</span>` : `<span class="sinal">a pensar</span>`;
     } else if (e.phase === "reveal") {
       const r = e.reveal && e.reveal.res && e.reveal.res[id];
-      sinal = !r ? "" : r.ok ? `<span class="sinal ok">certo, +${r.g}</span>` : r.c >= 0 ? `<span class="sinal mal">errado</span>` : `<span class="sinal">sem resposta</span>`;
+      const perda = r && r.g < 0 ? `, ${r.g}` : "";
+      sinal = !r ? "" : r.ok ? `<span class="sinal ok">certo, +${r.g}</span>` : r.c >= 0 ? `<span class="sinal mal">errado${perda}</span>` : `<span class="sinal ${perda ? "mal" : ""}">sem resposta${perda}</span>`;
     }
+    if (["pre", "question", "reveal"].includes(e.phase) && S.jokers[id] === e.qKey) sinal = `<span class="sinal joker">joker</span>${sinal}`;
     const pts = e.scores && e.scores[id] ? e.scores[id].pts : 0;
     const tel = eq[id].cap ? "" : `<span class="sinal mal">sem telemóvel</span>`;
     const trocar = eq[id].cap ? `<button class="mini" data-act="libertar" data-id="${esc(id)}">Trocar de telemóvel</button>` : "";
@@ -342,11 +361,21 @@ VISTAS.host = () => {
     corpo = `<section class="cartao"><h1>Regras no ecrã</h1><p>Toda a gente está a ver isto. Lê em voz alta se quiseres.</p>${listaRegras(e.cfg)}</section>`;
     const falta = nEq - nTel;
     botoes = `<button class="btn" data-act="comecar" ${nTel ? "" : "disabled"}>Começar o jogo</button>${nTel ? (falta ? `<p class="nota">${plural(falta, "equipa ainda está", "equipas ainda estão")} sem telemóvel. Pode entrar mais tarde.</p>` : "") : `<p class="nota">Falta pelo menos uma equipa com telemóvel.</p>`}`;
+  } else if (e.phase === "pre") {
+    const jog = nomesJoker();
+    corpo = `<section class="cartao">${etiquetas(e)}<h1>Hora do joker</h1>
+      <p>As equipas veem o tema e a dificuldade e decidem se apostam. A pergunta aparece quando o tempo acabar.</p>${relogio()}
+      <p>${jog.length ? `Jogaram o joker: ${jog.map(esc).join(", ")}.` : "Ainda ninguém jogou o joker."}</p></section>`;
+    botoes = `<button class="btn" data-act="mostrar">Mostrar a pergunta já</button><button class="btn sec" data-act="saltar">Saltar esta pergunta</button>`;
   } else if (e.phase === "question" || e.phase === "reveal") {
     const q = S.priv.deck[e.qNum - 1];
+    const med = e.q.media;
+    const linhaMedia = !med ? "" : med.t === "aud"
+      ? `<p><span class="sinal">pergunta com som</span> <button class="mini" data-act="repetir">Tocar o som outra vez</button></p>`
+      : `<p><span class="sinal">pergunta com imagem</span></p>`;
     const nResp = Object.keys(S.respostas || {}).length;
     corpo = `<section class="cartao">${etiquetas(e)}<h1 class="pergunta-host">${esc(e.q.texto)}</h1>
-      <ol class="opcoes-host">${e.q.opcoes.map((o, i) => `<li class="${i === q.correta ? "certa" : ""}"><b>${LETRAS[i]}</b> ${esc(o)}${i === q.correta ? ` <span class="sinal ok">certa</span>` : ""}</li>`).join("")}</ol>
+      <ol class="opcoes-host">${e.q.opcoes.map((o, i) => `<li class="${i === q.correta ? "certa" : ""}"><b>${LETRAS[i]}</b> ${esc(o)}${i === q.correta ? ` <span class="sinal ok">certa</span>` : ""}</li>`).join("")}</ol>${linhaMedia}
       ${e.phase === "question" ? `${relogio()}<p>Responderam ${nResp} de ${plural(nEq, "equipa", "equipas")}.</p>` : `<p>A resposta já está no ecrã.</p>`}</section>`;
     if (e.phase === "question") {
       botoes = `<button class="btn" data-act="revelar">Mostrar a resposta já</button><button class="btn sec" data-act="saltar">Saltar esta pergunta</button>`;
@@ -362,7 +391,7 @@ VISTAS.host = () => {
     corpo = `<section class="cartao"><h1>O jogo acabou</h1><p>O pódio está no ecrã principal.</p></section>`;
     botoes = `<a class="btn" href="${esc(BASE)}?v=criar">Criar outro jogo</a>`;
   }
-  const meio = ["question", "reveal", "scoreboard"].includes(e.phase);
+  const meio = ["pre", "question", "reveal", "scoreboard"].includes(e.phase);
   return `<main class="coluna">
     <header class="topo"><p class="sala">Sala <b>${SALA}</b>${S.priv.pin ? `<span class="pin">PIN ${esc(S.priv.pin)}</span>` : ""}</p><a class="btn sec peq" target="_blank" rel="noopener" href="${esc(BASE)}?sala=${SALA}&v=ecra">Abrir o ecrã principal</a></header>
     ${corpo}
@@ -495,21 +524,31 @@ function tabela(hist, adj, ganhos) {
   return L.classificacao(L.totais(hist, adj, eq), eq, S.estado && S.estado.scores, ganhos);
 }
 
-async function proximaPergunta(i) {
+// Antes de cada pergunta há uns segundos para jogar o joker, se ainda houver equipas com ele.
+async function proximaPergunta(i, direto = false) {
   const deck = S.priv.deck;
   if (i >= deck.length) return net.patch(caminho("state"), { phase: "final", scores: tabela(S.priv.hist, S.priv.adj) });
   const q = deck[i];
   const cfg = S.estado.cfg;
+  const comum = { qNum: i + 1, qKey: "q" + i, startedAt: net.ts(), answered: null, reveal: null, som: null };
+  const resumo = { tema: q.tema, dif: q.dif, tipo: q.tipo, bonus: !!q.bonus, pts: L.pontos(q.dif, cfg.pts) };
+  const eq = S.equipas || {};
+  const haJoker = cfg.joker && !direto && Object.keys(eq).some((id) => eq[id].cap && !S.jokers[id]);
+  if (haJoker) return net.patch(caminho("state"), { ...comum, phase: "pre", q: resumo, duracao: cfg.joker.tempo || 8 });
   return net.patch(caminho("state"), {
+    ...comum,
     phase: "question",
-    qNum: i + 1,
-    qKey: "q" + i,
-    q: { tema: q.tema, dif: q.dif, tipo: q.tipo, texto: q.texto, opcoes: q.opcoes, bonus: !!q.bonus, pts: L.pontos(q.dif, cfg.pts) },
-    startedAt: net.ts(),
+    q: { ...resumo, texto: q.texto, opcoes: q.opcoes, media: q.media || null },
     duracao: q.tempo || cfg.tempo,
-    answered: null,
-    reveal: null,
   });
+}
+
+let aAvancar = false;
+async function mostrarPergunta() {
+  const e = S.estado;
+  if (aAvancar || !e || e.phase !== "pre" || !S.priv || !souAnfitriao()) return;
+  aAvancar = true;
+  try { await proximaPergunta(e.qNum - 1, true); } finally { aAvancar = false; }
 }
 
 let aRevelar = false;
@@ -520,11 +559,18 @@ async function revelar() {
   aRevelar = true;
   try {
     const q = S.priv.deck[e.qNum - 1];
-    const res = L.pontuar({ correta: q.correta, pts: e.q.pts, respostas: S.respostas, equipas: S.equipas, inicio: e.startedAt, duracao: e.duracao });
+    const cfg = e.cfg;
+    const jk = {};
+    jokersDaPergunta().forEach((id) => { jk[id] = true; });
+    const res = L.pontuar({
+      correta: q.correta, pts: e.q.pts, respostas: S.respostas, equipas: S.equipas, inicio: e.startedAt, duracao: e.duracao,
+      velMax: cfg.vel || 0, mult: e.q.bonus ? cfg.mult || 2 : 1, jokers: jk,
+      jokerCerto: cfg.joker ? cfg.joker.certo : undefined, jokerErrado: cfg.joker ? cfg.joker.errado : undefined,
+    });
     await net.put(caminho("private/hist/" + e.qKey), res);
     const hist = { ...(S.priv.hist || {}), [e.qKey]: res };
     const curto = {};
-    for (const [id, r] of Object.entries(res)) curto[id] = { c: r.c, ok: r.ok, g: r.g };
+    for (const [id, r] of Object.entries(res)) curto[id] = { c: r.c, ok: r.ok, g: r.g, j: r.j, v: r.v, x: r.x };
     await net.patch(caminho("state"), { phase: "reveal", reveal: { correta: q.correta, res: curto }, scores: tabela(hist, S.priv.adj, res) });
   } finally {
     aRevelar = false;
@@ -553,10 +599,14 @@ ACOES.copiar = async () => {
 ACOES.regras = () => net.patch(caminho("state"), { phase: "rules" });
 ACOES.comecar = () => proximaPergunta(0);
 ACOES.revelar = () => revelar();
-ACOES.saltar = () => {
+ACOES.saltar = async () => {
   if (!confirm("Saltar esta pergunta? Ninguém ganha pontos com ela.")) return;
+  // Quem jogou o joker nesta pergunta recebe-o de volta.
+  for (const id of Object.keys(S.jokers)) if (S.jokers[id] === S.estado.qKey) await net.del(caminho("jokers/" + id));
   return proximaPergunta(S.estado.qNum);
 };
+ACOES.mostrar = () => mostrarPergunta();
+ACOES.repetir = () => net.patch(caminho("state"), { som: net.ts() });
 ACOES.seguinte = () => {
   const e = S.estado;
   if (e.phase === "reveal" && e.qNum < e.total && e.qNum % e.cfg.placar === 0) return net.patch(caminho("state"), { phase: "scoreboard" });
@@ -588,14 +638,7 @@ ACOES.remover = async ({ id }) => {
 
 // ---------- Ecrã principal ----------
 
-VISTAS.ecra = () => {
-  if (S.meta === undefined || S.estado === undefined) return espera();
-  if (S.meta === null || !S.estado) return semSala();
-  const e = S.estado;
-  const eq = S.equipas || {};
-  const nEq = Object.keys(eq).length;
-
-  if (e.phase === "lobby") {
+function ecraLobby(e, eq) {
     const link = `${BASE}?sala=${SALA}`;
     const m = modo();
     const ids = porOrdem(eq);
@@ -642,25 +685,56 @@ VISTAS.ecra = () => {
       <section class="e-equipas"><h2>${conta}</h2>
         <ul>${nomes.map((t) => `<li>${esc(t.nome)}</li>`).join("")}</ul></section>
     </main>`;
+}
+
+VISTAS.ecra = () => {
+  if (S.meta === undefined || S.estado === undefined) return espera();
+  if (S.meta === null || !S.estado) return semSala();
+  const e = S.estado;
+  const eq = S.equipas || {};
+  const nEq = Object.keys(eq).length;
+
+  if (e.phase === "lobby") {
+    const som = !e.cfg.audio ? "" : S.ui.somOk
+      ? `<p class="e-som">O som deste ecrã está ligado.</p>`
+      : `<p class="e-som"><button class="btn sec peq" data-act="ligarsom">Ligar o som deste ecrã</button> Este jogo tem perguntas com som.</p>`;
+    return ecraLobby(e, eq).replace("</main>", som + "</main>");
   }
   if (e.phase === "rules") {
     return `<div class="grinalda"></div><main class="e-regras"><h1 class="titulo">Regras</h1>${listaRegras(e.cfg)}</main>`;
   }
+  if (e.phase === "pre") {
+    const jog = nomesJoker();
+    return `<div class="grinalda"></div><main class="e-pre">
+      <p class="e-num">Pergunta ${e.qNum} de ${e.total}</p>
+      <h1 class="titulo">${esc(e.q.tema)}</h1>
+      <p class="etiquetas"><span class="etq">${DIFS[e.q.dif]}</span><span class="etq">${e.q.pts} pontos</span>${e.q.bonus ? `<span class="etq dobro">Vale a dobrar</span>` : ""}</p>
+      <p class="e-joker">Quem arrisca o joker?</p>
+      ${relogio()}
+      <p class="e-pe">${jog.length ? `Joker em jogo: ${jog.map(esc).join(", ")}` : `Certo conta a dobrar, errado custa ${Math.abs(e.cfg.joker ? e.cfg.joker.errado : 0)} pontos.`}</p></main>`;
+  }
   if (e.phase === "question" || e.phase === "reveal") {
     const rev = e.phase === "reveal" ? e.reveal || {} : null;
+    const med = e.q.media;
+    const imagem = med && med.t === "img" ? `<div class="e-img"><img src="${esc(med.u)}" alt=""></div>` : "";
+    const som = med && med.t === "aud" ? `<p class="e-som"><button class="btn sec peq" data-act="som">${S.ui.somBloq ? "Tocar o som" : "Tocar outra vez"}</button>${S.ui.somBloq ? " O navegador bloqueou o som. Carrega no botão." : " Pergunta com som."}</p>` : "";
+    const jog = nomesJoker();
+    const linhaJoker = jog.length ? `<p class="e-joker-linha">Joker em jogo: ${jog.map(esc).join(", ")}</p>` : "";
     const ops = e.q.opcoes.map((o, i) => {
       const cls = rev ? (i === rev.correta ? "certa" : "apagada") : "";
       return `<li class="op op${i} ${cls}"><span class="letra">${LETRAS[i]}</span><span class="txt">${esc(o)}</span></li>`;
     });
     let pe;
     if (rev) {
-      const certos = Object.entries(rev.res || {}).filter(([, r]) => r.ok).map(([id]) => (eq[id] ? eq[id].nome : "")).filter(Boolean);
-      pe = `<p class="e-pe">${certos.length ? `Acertaram: ${certos.map(esc).join(", ")}` : "Desta vez ninguém acertou."}</p>`;
+      const lista = Object.entries(rev.res || {}).filter(([id]) => eq[id]);
+      const certos = lista.filter(([, r]) => r.ok).sort((a, b) => b[1].g - a[1].g).map(([id, r]) => `${esc(eq[id].nome)} (+${r.g})`);
+      const perdas = lista.filter(([, r]) => !r.ok && r.g < 0).map(([id, r]) => `${esc(eq[id].nome)} (${r.g})`);
+      pe = `<p class="e-pe">${certos.length ? `Acertaram: ${certos.join(", ")}` : "Desta vez ninguém acertou."}</p>${perdas.length ? `<p class="e-pe">Joker perdido: ${perdas.join(", ")}</p>` : ""}`;
     } else {
-      const fim = S.ui.fim;
+      const fim = tempoAcabou();
       pe = `${relogio()}<p class="e-pe">${fim ? "Acabou o tempo!" : `${Object.keys(e.answered || {}).length} de ${plural(nEq, "equipa já respondeu", "equipas já responderam")}`}</p>`;
     }
-    return `<main class="e-pergunta">${etiquetas(e)}<h1 class="pergunta">${esc(e.q.texto)}</h1>
+    return `<main class="e-pergunta ${imagem ? "com-img" : ""}">${etiquetas(e)}${linhaJoker}<h1 class="pergunta">${esc(e.q.texto)}</h1>${imagem}${som}
       <ol class="opcoes ${e.q.opcoes.length <= 2 ? "duas" : ""}">${ops.join("")}</ol>${pe}</main>`;
   }
   if (e.phase === "scoreboard") {
@@ -744,22 +818,41 @@ VISTAS.equipa = () => {
       <p class="nota">Este é o telemóvel da equipa. Juntem-se à volta dele: o jogo começa quando o anfitrião quiser.</p>`;
   } else if (e.phase === "rules") {
     corpo = `<h1 class="titulo">Regras</h1>${listaRegras(e.cfg)}`;
+  } else if (e.phase === "pre") {
+    const jogado = S.jokers[tid];
+    const custo = Math.abs(e.cfg.joker ? e.cfg.joker.errado : 0);
+    if (jogado === e.qKey) {
+      corpo = `${etiquetas(e)}<h1 class="titulo">Joker jogado!</h1><p class="nota">Se acertarem, os pontos contam a dobrar. Se errarem, perdem ${custo}.</p>`;
+    } else if (jogado || !e.cfg.joker) {
+      corpo = `${etiquetas(e)}<h1 class="titulo">Preparados?</h1><p class="nota">${jogado ? "O vosso joker já foi usado. " : ""}A pergunta está quase a aparecer.</p>`;
+    } else {
+      corpo = `${etiquetas(e)}<h1 class="titulo">Querem jogar o joker?</h1>
+        <p class="nota">Só dá para usar uma vez no jogo inteiro. Certo conta a dobrar, errado custa ${custo} pontos.</p>${relogio()}
+        <button class="btn joker" data-act="joker">Jogar o joker</button><p class="nota">Se não quiserem, é só esperar.</p>`;
+    }
   } else if (e.phase === "question") {
+    const emJogo = S.jokers[tid] === e.qKey ? `<p class="aviso-joker">Joker em jogo</p>` : "";
+    const med = e.q.media;
+    const extra = !med ? "" : med.t === "img" ? `<img class="q-img" src="${esc(med.u)}" alt="">` : `<p class="nota">O som toca no ecrã principal.</p>`;
     const minha = S.minha && S.minha.key === e.qKey ? S.minha : null;
     if (minha) {
       corpo = `${etiquetas(e)}<h1 class="titulo">Resposta enviada</h1><p class="escolha op${minha.c}"><span class="letra">${LETRAS[minha.c]}</span><span class="txt">${esc(e.q.opcoes[minha.c])}</span></p><p class="nota">Agora é esperar pelos outros.</p>`;
-    } else if (S.ui.fim || S.ui.tarde === e.qKey) {
+    } else if (tempoAcabou() || S.ui.tarde === e.qKey) {
       corpo = `${etiquetas(e)}<h1 class="titulo">Acabou o tempo</h1><p class="nota">Desta vez ficou sem resposta.</p>`;
     } else {
-      corpo = `${etiquetas(e)}<p class="q-pergunta">${esc(e.q.texto)}</p>${relogio()}
+      corpo = `${etiquetas(e)}${emJogo}<p class="q-pergunta">${esc(e.q.texto)}</p>${extra}${relogio()}
         <div class="q-opcoes">${e.q.opcoes.map((o, i) => `<button class="op op${i}" data-act="responder" data-i="${i}"><span class="letra">${LETRAS[i]}</span><span class="txt">${esc(o)}</span></button>`).join("")}</div>`;
     }
   } else if (e.phase === "reveal") {
     const r = e.reveal && e.reveal.res && e.reveal.res[tid];
     const certa = e.reveal ? e.q.opcoes[e.reveal.correta] : "";
     if (!r) corpo = `<h1 class="titulo">Entraram a meio</h1><p class="nota">Contam a partir da próxima pergunta.</p>`;
-    else if (r.ok) corpo = `<h1 class="titulo bom">Certo!</h1><p class="grande">+${r.g} pontos</p>`;
-    else corpo = `<h1 class="titulo mau">${r.c >= 0 ? "Errado" : "Sem resposta"}</h1><p class="nota">A resposta certa era:</p><p class="grande">${esc(certa)}</p>`;
+    else if (r.ok) {
+      const partes = r.v || r.x > 1 ? `<p class="nota">${e.q.pts} da pergunta${r.v ? ` + ${r.v} de rapidez` : ""}${r.x > 1 ? `, tudo vezes ${r.x}` : ""}${r.j ? " com o joker" : ""}.</p>` : "";
+      corpo = `<h1 class="titulo bom">Certo!</h1><p class="grande">+${r.g} pontos</p>${partes}`;
+    } else {
+      corpo = `<h1 class="titulo mau">${r.c >= 0 ? "Errado" : "Sem resposta"}</h1>${r.g < 0 ? `<p class="grande">${r.g} pontos</p><p class="nota">O joker não correu bem.</p>` : ""}<p class="nota">A resposta certa era:</p><p class="grande">${esc(certa)}</p>`;
+    }
   } else if (e.phase === "scoreboard") {
     corpo = `<h1 class="titulo">${meu ? `${meu.pos}.º lugar` : "Classificação"}</h1>${listaPontos(e.scores, tid)}`;
   } else {
@@ -806,6 +899,13 @@ ACOES.reclamar = async ({ id }) => {
   }
 };
 
+ACOES.joker = async () => {
+  const e = S.estado;
+  const tid = minhaEquipa();
+  if (!e || !tid || e.phase !== "pre" || S.jokers[tid]) return;
+  try { await net.put(caminho("jokers/" + tid), e.qKey); } catch { /* já não foi a tempo */ }
+};
+
 ACOES.responder = async ({ i }) => {
   const e = S.estado;
   const tid = minhaEquipa();
@@ -827,7 +927,7 @@ ACOES.responder = async ({ i }) => {
 
 function tique() {
   const e = S.estado;
-  if (!e || e.phase !== "question" || !e.startedAt) return;
+  if (!e || (e.phase !== "question" && e.phase !== "pre") || !e.startedAt) return;
   const total = e.duracao * 1000;
   const resta = limita(e.startedAt + total - net.now(), 0, total);
   document.querySelectorAll("[data-seg]").forEach((el) => { el.textContent = Math.ceil(resta / 1000); });
@@ -837,8 +937,40 @@ function tique() {
   });
   const fim = resta <= 0;
   if (fim !== !!S.ui.fim) { S.ui.fim = fim; pintar(); }
-  if (VISTA === "host" && net.now() >= e.startedAt + total + 400) revelar().catch(console.error);
+  if (VISTA === "host" && net.now() >= e.startedAt + total + 400) (e.phase === "pre" ? mostrarPergunta() : revelar()).catch(console.error);
 }
+
+// ---------- Som (só no ecrã principal) ----------
+
+let somAtual = null;
+let somChave = "";
+
+function tocarSom() {
+  if (!somAtual) return;
+  somAtual.currentTime = 0;
+  somAtual.play().then(() => { if (S.ui.somBloq) { S.ui.somBloq = false; pintar(); } })
+    .catch(() => { if (!S.ui.somBloq) { S.ui.somBloq = true; pintar(); } });
+}
+
+function gerirSom() {
+  if (VISTA !== "ecra") return;
+  const e = S.estado;
+  const med = e && (e.phase === "question" || e.phase === "reveal") && e.q && e.q.media;
+  const chave = med && med.t === "aud" ? `${e.qKey}|${med.u}|${e.som || 0}` : "";
+  if (chave === somChave) return;
+  const mesmoSom = chave && somChave && chave.split("|").slice(0, 2).join("|") === somChave.split("|").slice(0, 2).join("|");
+  somChave = chave;
+  if (!chave) { if (somAtual) somAtual.pause(); somAtual = null; return; }
+  if (!mesmoSom) { if (somAtual) somAtual.pause(); somAtual = new Audio(med.u); }
+  tocarSom();
+}
+
+ACOES.som = () => tocarSom();
+ACOES.ligarsom = () => {
+  try { new Audio("data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=").play().catch(() => {}); } catch { /* sem som */ }
+  S.ui.somOk = true;
+  pintar();
+};
 
 // ---------- Ligações ----------
 
@@ -933,6 +1065,7 @@ async function arrancar() {
   net.watch(caminho("meta"), (v) => { S.meta = v; ligaPriv(); aoEstado(); pintar(); });
   if (VISTA === "host") net.watch(caminho("hosts/" + S.uid), (v) => { S.hostExtra = !!v; ligaPriv(); aoEstado(); pintar(); });
   net.watch(caminho("players"), (v) => { S.jogadores = v || {}; pintar(); });
+  net.watch(caminho("jokers"), (v) => { S.jokers = v || {}; pintar(); });
   net.watch(caminho("state"), (v) => { S.estado = v; aoEstado(); pintar(); });
   net.watch(caminho("teams"), (v) => { S.equipas = v || {}; aoEstado(); if (VISTA === "host") aoResponder(); pintar(); });
   setInterval(tique, 200);
