@@ -1,5 +1,5 @@
-// Quiz & Mímica, fases 1 a 3: sala, entrada por QR, sorteio de equipas, perguntas com imagem e som,
-// relógio, bónus de rapidez, perguntas a dobrar, joker, pontos e classificação.
+// Quiz & Mímica: sala, entrada por QR, sorteio de equipas, perguntas com imagem e som, relógio,
+// bónus de rapidez, perguntas a dobrar, joker, rondas de mímica, pontos e classificação.
 
 import * as net from "./net.js";
 import { lerFolha } from "./sheet.js";
@@ -24,6 +24,7 @@ const S = {
   uid: null, meta: undefined, estado: undefined, equipas: undefined, priv: undefined,
   jogadores: undefined, hostExtra: false, jokers: {},
   respostas: null, respKey: null, minha: null,
+  palpites: null, palpKey: null, meus: null, palavra: null,
   ui: { criar: { passo: "folha" } },
 };
 
@@ -37,6 +38,8 @@ const membros = (t) => (t && t.m) || [];
 const tempoAcabou = () => { const e = S.estado; return !!(e && e.startedAt && net.now() >= e.startedAt + e.duracao * 1000); };
 const jokersDaPergunta = () => { const e = S.estado; return Object.keys(S.jokers).filter((id) => S.jokers[id] === e.qKey && S.equipas && S.equipas[id]); };
 const nomesJoker = () => jokersDaPergunta().map((id) => S.equipas[id].nome);
+const equipasComTel = () => porOrdem(S.equipas).filter((id) => S.equipas[id].cap);
+const FASES_MIMICA = ["mpre", "mimica", "mreveal"];
 const limita = (v, min, max) => Math.max(min, Math.min(max, v));
 const plural = (n, um, varios) => `${n} ${n === 1 ? um : varios}`;
 
@@ -99,6 +102,18 @@ function etiquetas(e) {
   return `<p class="etiquetas"><span class="etq forte">Pergunta ${e.qNum} de ${e.total}</span><span class="etq">${esc(e.q.tema)}</span><span class="etq">${DIFS[e.q.dif]}</span><span class="etq">${e.q.pts} pontos</span>${e.q.bonus ? `<span class="etq dobro">Vale a dobrar</span>` : ""}</p>`;
 }
 
+function etiquetasMimica(e) {
+  const m = e.mim || {};
+  return `<p class="etiquetas"><span class="etq forte">Mímica ${m.n} de ${m.de}</span><span class="etq">${esc(m.cat)}</span><span class="etq">${DIFS[m.dif]}</span>${m.bonus ? `<span class="etq dobro">Vale a dobrar</span>` : ""}</p>`;
+}
+
+// Uma caixa por letra: vazia enquanto está escondida, preenchida quando se revela.
+function caixas(texto) {
+  return `<p class="letras">${String(texto || "").split(" ").map((pal) => `<span class="pal">${Array.from(pal).map((ch) => (
+    ch === "_" ? `<span class="cx"></span>` : /[\p{L}\p{N}]/u.test(ch) ? `<span class="cx cheia">${esc(ch.toUpperCase())}</span>` : `<span class="pt">${esc(ch)}</span>`
+  )).join("")}</span>`).join("")}</p>`;
+}
+
 const relogio = () => `<div class="tempo"><div class="trilho"><div class="barra" data-barra></div></div><b class="seg" data-seg></b></div>`;
 
 function listaPontos(scores, destaque) {
@@ -112,7 +127,8 @@ function listaPontos(scores, destaque) {
 }
 
 function listaRegras(cfg) {
-  return `<ul class="regras">${L.regras(cfg).map((r) => `<li>${esc(r)}</li>`).join("")}</ul>`;
+  const r = L.regras(cfg);
+  return `<ul class="regras ${r.length > 12 ? "muitas cheias" : r.length > 9 ? "muitas" : ""}">${r.map((x) => `<li>${esc(x)}</li>`).join("")}</ul>`;
 }
 
 const VISTAS = {};
@@ -151,7 +167,8 @@ VISTAS.criar = () => {
     const nomes = Object.keys(temas).sort((a, b) => a.localeCompare(b, "pt"));
     corpo += `<section class="cartao">
       <h2>${plural(c.perguntas.length, "pergunta pronta", "perguntas prontas")} a usar</h2>
-      ${c.erros.length ? `<details class="problemas"><summary>${plural(c.erros.length, "linha fica de fora", "linhas ficam de fora")} até ${c.erros.length === 1 ? "ser corrigida" : "serem corrigidas"}</summary><ul>${c.erros.map((e) => `<li>Linha ${e.linha}: ${esc(e.msg)}</li>`).join("")}</ul></details>` : ""}
+      <p>${c.mimicas.length ? `${plural(c.mimicas.length, "desafio de mímica pronto", "desafios de mímica prontos")} a usar.` : `Sem mímica: a folha "Mimica" não tem desafios válidos.`}</p>
+      ${c.erros.length ? `<details class="problemas"><summary>${plural(c.erros.length, "linha fica de fora", "linhas ficam de fora")} até ${c.erros.length === 1 ? "ser corrigida" : "serem corrigidas"}</summary><ul>${c.erros.map((e) => `<li>${esc(e.folha)}, linha ${e.linha}: ${esc(e.msg)}</li>`).join("")}</ul></details>` : ""}
     </section>`;
     if (c.perguntas.length) {
       corpo += `<form class="cartao" data-form="criar">
@@ -166,6 +183,14 @@ VISTAS.criar = () => {
           <div><label for="tempo">Segundos por pergunta</label><input id="tempo" type="number" min="5" max="300" value="${c.cfg.tempo_pergunta}" inputmode="numeric"></div>
           <div><label for="placar">Mostrar a classificação a cada</label><input id="placar" type="number" min="1" max="50" value="1" inputmode="numeric"><p class="ajuda">perguntas</p></div>
         </div>
+        ${c.mimicas.length ? `<fieldset><legend>Mímica</legend><div class="pilha">
+          <label class="modo-op"><input type="checkbox" id="mi_on" checked> <span><b>Com rondas de mímica.</b> Uma equipa representa e as outras adivinham no telemóvel.</span></label>
+          <label class="modo-op"><input type="checkbox" id="mi_pista" ${c.cfg.pista_mimica ? "checked" : ""}> <span><b>Letra de ajuda.</b> A meio do tempo, o ecrã revela uma letra da resposta.</span></label>
+        </div>
+        <div class="linha-campos espaco">
+          <div><label for="mi_cada">Uma ronda a cada</label><input id="mi_cada" type="number" min="1" max="50" value="${c.cfg.perguntas_por_mimica}" inputmode="numeric"><p class="ajuda">perguntas</p></div>
+          <div><label for="mi_tempo">Segundos por ronda</label><input id="mi_tempo" type="number" min="15" max="300" value="${c.cfg.tempo_mimica}" inputmode="numeric"></div>
+        </div><p class="ajuda" id="mdisp"></p></fieldset>` : ""}
         <fieldset><legend>Bónus</legend><div class="pilha">
           <label class="modo-op"><input type="checkbox" id="b_vel" checked> <span><b>Rapidez.</b> Quem acerta mais depressa ganha até ${c.cfg.bonus_velocidade_max} pontos extra.</span></label>
           <label class="modo-op"><input type="checkbox" id="b_joker" checked> <span><b>Joker.</b> Cada equipa pode apostar uma vez, antes de ver a pergunta: a dobrar se acertar, menos ${Math.abs(c.cfg.joker_errado)} pontos se errar.</span></label>
@@ -201,6 +226,16 @@ function atualizarDisponiveis() {
   el.textContent = n ? `Há ${n} com estes temas e dificuldades.` : "Não há perguntas com estes temas e dificuldades.";
   const campo = document.getElementById("n");
   if (campo) campo.max = Math.max(1, n);
+  const md = document.getElementById("mdisp");
+  if (!md) return;
+  if (!document.getElementById("mi_on").checked) { md.textContent = "Este jogo fica só com perguntas."; return; }
+  const nq = limita(parseInt(campo.value, 10) || 1, 1, Math.max(1, n));
+  const cada = limita(parseInt(document.getElementById("mi_cada").value, 10) || 5, 1, 50);
+  const rondas = Math.floor(nq / cada);
+  const ha = c.mimicas.filter((x) => escolhasCriar().difs.includes(x.dif)).length;
+  md.textContent = rondas === 0 ? `Com ${plural(nq, "pergunta", "perguntas")} e uma ronda a cada ${cada}, o jogo fica sem mímica.`
+    : rondas > ha ? `Dá ${plural(rondas, "ronda", "rondas")}, mas só há ${plural(ha, "desafio", "desafios")} com estas dificuldades.`
+    : `Dá ${plural(rondas, "ronda", "rondas")} de mímica. Para todas as equipas representarem as mesmas vezes, convém ser múltiplo do número de equipas.`;
 }
 
 const FORMS = {};
@@ -223,15 +258,19 @@ FORMS.folha = async (form) => {
   }
   c.erro = ""; c.aCarregar = true; pintar();
   try {
-    const [perg, conf] = await Promise.all([lerFolha(r.id, "Perguntas"), lerFolha(r.id, "Config").catch(() => null)]);
+    const [perg, conf, mimi] = await Promise.all([lerFolha(r.id, "Perguntas"), lerFolha(r.id, "Config").catch(() => null), lerFolha(r.id, "Mimica").catch(() => null)]);
     const tab = L.tabelaGviz(perg, ["pergunta", "certa"]);
     if (!tab.ok) throw new Error("sem-folha");
     const v = L.validarPerguntas(tab);
     let tabCfg = null;
     try { tabCfg = conf && L.tabelaGviz(conf, ["chave", "valor"]); } catch { /* usa os valores normais */ }
+    // Se a folha "Mimica" não existir, o Google devolve a primeira folha: por isso exige-se a coluna "resposta".
+    let vm = { boas: [], erros: [] };
+    try { const tabM = mimi && L.tabelaGviz(mimi, ["resposta", "categoria"]); if (tabM && tabM.ok) vm = L.validarMimicas(tabM); } catch { /* fica sem mímica */ }
     c.cfg = L.lerConfig(tabCfg);
     c.perguntas = v.boas;
-    c.erros = v.erros;
+    c.mimicas = vm.boas;
+    c.erros = [...v.erros.map((x) => ({ ...x, folha: "Perguntas" })), ...vm.erros.map((x) => ({ ...x, folha: "Mimica" }))];
     c.passo = "opcoes";
     c.pin = c.pin || String(Math.floor(1000 + Math.random() * 9000));
     guarda("folha", url);
@@ -262,6 +301,30 @@ FORMS.criar = async (form) => {
   const modoEquipas = escolhido ? escolhido.value : "scan";
   const digitos = form.querySelector("#pin").value.replace(/\D/g, "");
   const pin = digitos.length >= 4 ? digitos.slice(0, 6) : c.pin;
+  let mim = null;
+  let mdeck = [];
+  const comMimica = form.querySelector("#mi_on");
+  if (comMimica && comMimica.checked) {
+    const cada = limita(num("mi_cada", 5), 1, 50);
+    const rondas = Math.floor(n / cada);
+    const dispM = c.mimicas.filter((x) => escolhas.difs.includes(x.dif));
+    if (rondas > dispM.length) {
+      c.erroCriar = `O jogo precisa de ${plural(rondas, "desafio", "desafios")} de mímica e só há ${dispM.length} com essas dificuldades. Aumenta o intervalo entre rondas ou escolhe mais dificuldades.`;
+      return pintar();
+    }
+    if (rondas > 0) {
+      // Vão uns desafios a mais, para o anfitrião poder trocar uma palavra.
+      mdeck = L.baralhar(dispM).slice(0, rondas + 8).map((x) => ({ r: x.r, alt: x.alt, cat: x.cat, dif: x.dif, bonus: x.bonus }));
+      mim = {
+        cada, rondas,
+        tempo: limita(num("mi_tempo", 60), 15, 300),
+        pista: form.querySelector("#mi_pista").checked,
+        pts: [c.cfg.mimica_1, c.cfg.mimica_2, c.cfg.mimica_3, c.cfg.mimica_restantes],
+        atores: c.cfg.mimica_atores_max,
+        mult: [1, c.cfg.mimica_mult_medio, c.cfg.mimica_mult_dificil],
+      };
+    }
+  }
   c.erroCriar = ""; c.aCriar = true; pintar();
   try {
     const deck = L.fazerBaralho(c.perguntas, { ...escolhas, n });
@@ -272,7 +335,7 @@ FORMS.criar = async (form) => {
       if ((await net.read(`rooms/${codigo}/meta`)) == null) break;
     }
     const cfg = {
-      total: deck.length, tempo, placar, modo: modoEquipas,
+      total: deck.length, tempo, placar, modo: modoEquipas, mim,
       vel: comRapidez ? c.cfg.bonus_velocidade_max : 0,
       mult: c.cfg.multiplicador_bonus,
       joker: comJoker ? { certo: c.cfg.joker_certo, errado: c.cfg.joker_errado, tempo: c.cfg.tempo_joker } : null,
@@ -283,7 +346,7 @@ FORMS.criar = async (form) => {
       extras,
     };
     await net.put(`rooms/${codigo}/meta`, { hostUid: S.uid, at: net.ts() });
-    await net.put(`rooms/${codigo}/private`, { deck, pin });
+    await net.put(`rooms/${codigo}/private`, { deck, pin, mdeck });
     await net.put(`rooms/${codigo}/state`, { phase: "lobby", total: deck.length, cfg });
     guarda("sala", codigo);
     location.href = `${BASE}?sala=${codigo}&v=host`;
@@ -314,6 +377,13 @@ function painelEquipas() {
       const r = e.reveal && e.reveal.res && e.reveal.res[id];
       const perda = r && r.g < 0 ? `, ${r.g}` : "";
       sinal = !r ? "" : r.ok ? `<span class="sinal ok">certo, +${r.g}</span>` : r.c >= 0 ? `<span class="sinal mal">errado${perda}</span>` : `<span class="sinal ${perda ? "mal" : ""}">sem resposta${perda}</span>`;
+    }
+    if (e.phase === "mpre" || e.phase === "mimica") {
+      const m = e.mim || {};
+      sinal = id === m.ator ? `<span class="sinal joker">a representar</span>` : m.certos && m.certos[id] ? `<span class="sinal ok">adivinhou</span>` : "";
+    } else if (e.phase === "mreveal") {
+      const r = e.mrev && e.mrev.res && e.mrev.res[id];
+      sinal = r && r.g ? `<span class="sinal ok">+${r.g}</span>` : "";
     }
     if (["pre", "question", "reveal"].includes(e.phase) && S.jokers[id] === e.qKey) sinal = `<span class="sinal joker">joker</span>${sinal}`;
     const pts = e.scores && e.scores[id] ? e.scores[id].pts : 0;
@@ -360,7 +430,10 @@ VISTAS.host = () => {
   } else if (e.phase === "rules") {
     corpo = `<section class="cartao"><h1>Regras no ecrã</h1><p>Toda a gente está a ver isto. Lê em voz alta se quiseres.</p>${listaRegras(e.cfg)}</section>`;
     const falta = nEq - nTel;
-    botoes = `<button class="btn" data-act="comecar" ${nTel ? "" : "disabled"}>Começar o jogo</button>${nTel ? (falta ? `<p class="nota">${plural(falta, "equipa ainda está", "equipas ainda estão")} sem telemóvel. Pode entrar mais tarde.</p>` : "") : `<p class="nota">Falta pelo menos uma equipa com telemóvel.</p>`}`;
+    const mi = e.cfg.mim;
+    const avisoMimica = !mi || !nTel ? "" : nTel < 2 ? `<p class="nota">Com uma só equipa não há rondas de mímica.</p>`
+      : mi.rondas % nTel ? `<p class="nota">Com ${nTel} equipas e ${plural(mi.rondas, "ronda", "rondas")} de mímica, nem todas representam o mesmo número de vezes.</p>` : "";
+    botoes = `<button class="btn" data-act="comecar" ${nTel ? "" : "disabled"}>Começar o jogo</button>${avisoMimica}${nTel ? (falta ? `<p class="nota">${plural(falta, "equipa ainda está", "equipas ainda estão")} sem telemóvel. Pode entrar mais tarde.</p>` : "") : `<p class="nota">Falta pelo menos uma equipa com telemóvel.</p>`}`;
   } else if (e.phase === "pre") {
     const jog = nomesJoker();
     corpo = `<section class="cartao">${etiquetas(e)}<h1>Hora do joker</h1>
@@ -381,9 +454,11 @@ VISTAS.host = () => {
       botoes = `<button class="btn" data-act="revelar">Mostrar a resposta já</button><button class="btn sec" data-act="saltar">Saltar esta pergunta</button>`;
     } else {
       const ultima = e.qNum >= e.total;
-      const rotulo = ultima ? "Ver o pódio" : e.qNum % e.cfg.placar === 0 ? "Mostrar a classificação" : "Pergunta seguinte";
+      const rotulo = mimicaDevida(e) ? "Ronda de mímica" : ultima ? "Ver o pódio" : e.qNum % e.cfg.placar === 0 ? "Mostrar a classificação" : "Pergunta seguinte";
       botoes = `<button class="btn" data-act="seguinte">${rotulo}</button>`;
     }
+  } else if (FASES_MIMICA.includes(e.phase)) {
+    [corpo, botoes] = hostMimica(e);
   } else if (e.phase === "scoreboard") {
     corpo = `<section class="cartao"><h1>Classificação no ecrã</h1><p>Feitas ${e.qNum} de ${plural(e.total, "pergunta", "perguntas")}.</p></section>`;
     botoes = `<button class="btn" data-act="seguinte">Pergunta seguinte</button>`;
@@ -391,7 +466,7 @@ VISTAS.host = () => {
     corpo = `<section class="cartao"><h1>O jogo acabou</h1><p>O pódio está no ecrã principal.</p></section>`;
     botoes = `<a class="btn" href="${esc(BASE)}?v=criar">Criar outro jogo</a>`;
   }
-  const meio = ["pre", "question", "reveal", "scoreboard"].includes(e.phase);
+  const meio = ["pre", "question", "reveal", "scoreboard", ...FASES_MIMICA].includes(e.phase);
   return `<main class="coluna">
     <header class="topo"><p class="sala">Sala <b>${SALA}</b>${S.priv.pin ? `<span class="pin">PIN ${esc(S.priv.pin)}</span>` : ""}</p><a class="btn sec peq" target="_blank" rel="noopener" href="${esc(BASE)}?sala=${SALA}&v=ecra">Abrir o ecrã principal</a></header>
     ${corpo}
@@ -400,6 +475,37 @@ VISTAS.host = () => {
     ${meio ? `<p class="nota"><button class="ligacao" data-act="terminar">Terminar o jogo agora</button></p>` : ""}
   </main>`;
 };
+
+function hostMimica(e) {
+  const m = e.mim || {};
+  const eq = S.equipas || {};
+  const p = (S.priv.mdeck || [])[S.priv.matual] || { r: "…" };
+  const ator = eq[m.ator] ? eq[m.ator].nome : "equipa removida";
+  const outros = equipasComTel().filter((id) => id !== m.ator);
+  const nCertos = Object.keys(m.certos || {}).filter((id) => eq[id]).length;
+  const palavra = `<p class="palavra-host">${esc(p.r)}</p>`;
+  if (e.phase === "mpre") {
+    return [`<section class="cartao">${etiquetasMimica(e)}<h1>Representa: ${esc(ator)}</h1>${palavra}
+      <p>A equipa já vê a palavra no telemóvel dela. Quando estiverem prontos, começa a contar o tempo.</p></section>`,
+      `<button class="btn" data-act="mcomecar">Começar a mímica</button>${(S.priv.mdeck || []).length > 1 ? `<button class="btn sec" data-act="mtrocar">Trocar a palavra</button>` : ""}<button class="btn sec" data-act="msaltar">Saltar esta ronda</button>`];
+  }
+  if (e.phase === "mimica") {
+    const linhas = outros.filter((id) => !(m.certos && m.certos[id])).map((id) => {
+      const gs = Object.values((S.palpites && S.palpites[id]) || {}).sort((a, b) => (a.at || 0) - (b.at || 0));
+      const ult = gs[gs.length - 1];
+      return `<li><span class="nome">${esc(eq[id].nome)}</span><span class="palp">${ult ? `«${esc(ult.t)}»` : "ainda sem palpites"}</span>${ult ? `<button class="mini" data-act="aceitar" data-id="${esc(id)}">Aceitar</button>` : ""}</li>`;
+    }).join("");
+    return [`<section class="cartao">${etiquetasMimica(e)}<h1>Representa: ${esc(ator)}</h1>${palavra}${relogio()}
+      <p>Adivinharam ${nCertos} de ${plural(outros.length, "equipa", "equipas")}.</p>
+      ${linhas ? `<h2>Ainda a tentar</h2><p class="ajuda">Se um palpite estiver certo mas escrito de outra maneira, aceita-o.</p><ul class="lista-equipas">${linhas}</ul>` : ""}</section>`,
+      `<button class="btn" data-act="mrevelar">Mostrar a resposta já</button><button class="btn sec" data-act="msaltar">Saltar esta ronda</button>`];
+  }
+  const rv = e.mrev || {};
+  const ra = rv.res && rv.res[m.ator];
+  return [`<section class="cartao">${etiquetasMimica(e)}<h1>A resposta já está no ecrã</h1><p class="palavra-host">${esc(rv.resposta)}</p>
+    <p>${ra ? `Adivinharam ${ra.n} de ${plural(ra.de, "equipa", "equipas")}. ${esc(ator)} ganha ${ra.g} pontos por representar.` : ""}</p></section>`,
+    `<button class="btn" data-act="seguinte">${e.qNum >= e.total ? "Ver o pódio" : "Mostrar a classificação"}</button>`];
+}
 
 function painelSorteio() {
   const eq = S.equipas || {};
@@ -551,6 +657,145 @@ async function mostrarPergunta() {
   try { await proximaPergunta(e.qNum - 1, true); } finally { aAvancar = false; }
 }
 
+// ---------- Rondas de mímica (anfitrião) ----------
+
+const mimicaDevida = (e) => !!(e.cfg.mim && S.priv && (S.priv.mdeck || []).length && e.qNum % e.cfg.mim.cada === 0 && equipasComTel().length >= 2);
+
+// Começa uma ronda: escolhe a equipa (à vez) e a palavra, e mostra a palavra só no telemóvel dessa equipa.
+// troca = true dá outra palavra à mesma equipa.
+async function iniciarMimica(troca = false) {
+  const e = S.estado;
+  const cfg = e.cfg.mim;
+  const md = (S.priv && S.priv.mdeck) || [];
+  if (aAvancar) return;
+  if (!cfg || !md.length) return proximaPergunta(e.qNum);
+  aAvancar = true;
+  try {
+    const ordem = equipasComTel();
+    const mi = S.priv.mi || 0;
+    const r = troca ? Math.max(0, (S.priv.mr || 1) - 1) : S.priv.mr || 0;
+    const ator = troca && e.mim ? e.mim.ator : ordem[r % ordem.length];
+    const idx = mi % md.length;
+    const p = md[idx];
+    const key = "m" + mi;
+    const base = Math.round(cfg.pts[0] * cfg.mult[p.dif - 1]) * (p.bonus ? e.cfg.mult || 2 : 1);
+    await net.patch(caminho("private"), { mi: mi + 1, mr: r + 1, matual: idx });
+    await net.put(caminho("mimica/" + ator), { key, palavra: p.r });
+    await net.patch(caminho("state"), {
+      phase: "mpre", startedAt: null, mrev: null,
+      mim: { key, n: Math.max(1, Math.round(e.qNum / cfg.cada)), de: cfg.rondas, ator, cat: p.cat, dif: p.dif, bonus: !!p.bonus, base, forma: L.forma(p.r) },
+    });
+  } finally {
+    aAvancar = false;
+  }
+}
+
+// As equipas que já adivinharam, por ordem. Quem manda é esta lista; o estado público é uma cópia.
+let ordemCertos = [];
+let ordemKey = null;
+function acertarOrdem(m) {
+  if (ordemKey === m.key) return;
+  ordemKey = m.key;
+  ordemCertos = Object.entries(m.certos || {}).sort((a, b) => a[1] - b[1]).map(([id]) => id);
+}
+
+function todosAdivinharam(m) {
+  const outros = equipasComTel().filter((id) => id !== m.ator);
+  return outros.length > 0 && outros.every((id) => ordemCertos.includes(id));
+}
+
+// Confere os palpites que chegaram e publica quem acertou e quantos palpites já foram vistos.
+function verPalpites() {
+  const e = S.estado;
+  if (!e || e.phase !== "mimica" || !e.mim || S.palpKey !== e.mim.key || !S.priv || !souAnfitriao()) return;
+  const m = e.mim;
+  const p = (S.priv.mdeck || [])[S.priv.matual];
+  if (!p) return;
+  acertarOrdem(m);
+  const limite = (e.startedAt || 0) + e.duracao * 1000 + 1500;
+  const novos = [];
+  const vistos = {};
+  for (const [id, lista] of Object.entries(S.palpites || {})) {
+    if (id === m.ator || !S.equipas || !S.equipas[id]) continue;
+    const gs = Object.values(lista || {}).filter((g) => g && typeof g.t === "string" && (g.at || 0) <= limite).sort((a, b) => (a.at || 0) - (b.at || 0));
+    vistos[id] = gs.length;
+    if (ordemCertos.includes(id)) continue;
+    const certo = gs.find((g) => L.acerta(g.t, p));
+    if (certo) novos.push({ id, at: certo.at || 0 });
+  }
+  novos.sort((a, b) => a.at - b.at).forEach((x) => ordemCertos.push(x.id));
+  const mud = {};
+  for (const [id, n] of Object.entries(vistos)) {
+    const ok = ordemCertos.includes(id);
+    const antes = m.res && m.res[id];
+    if (!antes || antes.n !== n || !!antes.ok !== ok) mud[`mim/res/${id}`] = { n, ok };
+    if (ok && !(m.certos && m.certos[id])) mud[`mim/certos/${id}`] = ordemCertos.indexOf(id) + 1;
+  }
+  if (Object.keys(mud).length) net.patch(caminho("state"), mud).catch(console.error);
+  if (todosAdivinharam(m)) setTimeout(() => revelarMimica().catch(falha), 900);
+}
+
+let pistaDada = null;
+function darPista() {
+  const e = S.estado;
+  const m = e.mim;
+  if (!e.cfg.mim || !e.cfg.mim.pista || !m || m.pista || pistaDada === m.key || !S.priv) return;
+  if (net.now() < e.startedAt + e.duracao * 500) return;
+  const p = (S.priv.mdeck || [])[S.priv.matual];
+  if (!p) return;
+  pistaDada = m.key;
+  net.patch(caminho("state"), { "mim/forma": L.comPista(m.forma, p.r), "mim/pista": true }).catch(console.error);
+}
+
+let aRevelarM = false;
+async function revelarMimica() {
+  const e = S.estado;
+  if (aRevelarM || !e || e.phase !== "mimica" || !e.mim || !S.priv || !souAnfitriao()) return;
+  if (S.palpKey !== e.mim.key) return; // os palpites desta ronda ainda não chegaram
+  const p = (S.priv.mdeck || [])[S.priv.matual];
+  if (!p) return;
+  aRevelarM = true;
+  try {
+    const m = e.mim;
+    const cfg = e.cfg.mim;
+    acertarOrdem(m);
+    const res = L.pontuarMimica({
+      ordem: ordemCertos, outros: equipasComTel(), ator: m.ator, equipas: S.equipas,
+      pts: cfg.pts, atores: cfg.atores, multDif: cfg.mult[p.dif - 1] || 1, multBonus: p.bonus ? e.cfg.mult || 2 : 1,
+    });
+    await net.put(caminho("private/hist/" + m.key), res);
+    const hist = { ...(S.priv.hist || {}), [m.key]: res };
+    await net.del(caminho("mimica/" + m.ator));
+    await net.patch(caminho("state"), { phase: "mreveal", mrev: { resposta: p.r, res }, scores: tabela(hist, S.priv.adj, res) });
+  } finally {
+    aRevelarM = false;
+  }
+}
+
+ACOES.mcomecar = () => {
+  const e = S.estado;
+  if (e.phase !== "mpre") return;
+  return net.patch(caminho("state"), { phase: "mimica", startedAt: net.ts(), duracao: e.cfg.mim.tempo });
+};
+ACOES.mtrocar = () => { if (S.estado.phase === "mpre") return iniciarMimica(true); };
+ACOES.mrevelar = () => revelarMimica();
+ACOES.msaltar = async () => {
+  const e = S.estado;
+  if (!confirm("Saltar esta ronda de mímica? Ninguém ganha pontos e a mesma equipa representa na ronda seguinte.")) return;
+  if (e.mim) await net.del(caminho("mimica/" + e.mim.ator));
+  await net.patch(caminho("private"), { mr: Math.max(0, (S.priv.mr || 1) - 1) });
+  return proximaPergunta(e.qNum);
+};
+ACOES.aceitar = async ({ id }) => {
+  const e = S.estado;
+  if (e.phase !== "mimica" || !e.mim || !S.equipas[id] || id === e.mim.ator) return;
+  acertarOrdem(e.mim);
+  if (!ordemCertos.includes(id)) ordemCertos.push(id);
+  const n = Object.keys((S.palpites && S.palpites[id]) || {}).length;
+  await net.patch(caminho("state"), { [`mim/certos/${id}`]: ordemCertos.indexOf(id) + 1, [`mim/res/${id}`]: { n, ok: true } });
+  if (todosAdivinharam(e.mim)) setTimeout(() => revelarMimica().catch(falha), 900);
+};
+
 let aRevelar = false;
 async function revelar() {
   const e = S.estado;
@@ -603,14 +848,18 @@ ACOES.saltar = async () => {
   if (!confirm("Saltar esta pergunta? Ninguém ganha pontos com ela.")) return;
   // Quem jogou o joker nesta pergunta recebe-o de volta.
   for (const id of Object.keys(S.jokers)) if (S.jokers[id] === S.estado.qKey) await net.del(caminho("jokers/" + id));
+  if (mimicaDevida(S.estado)) return iniciarMimica();
   return proximaPergunta(S.estado.qNum);
 };
 ACOES.mostrar = () => mostrarPergunta();
 ACOES.repetir = () => net.patch(caminho("state"), { som: net.ts() });
 ACOES.seguinte = () => {
   const e = S.estado;
+  if (e.phase === "reveal" && mimicaDevida(e)) return iniciarMimica();
   if (e.phase === "reveal" && e.qNum < e.total && e.qNum % e.cfg.placar === 0) return net.patch(caminho("state"), { phase: "scoreboard" });
-  if (e.phase === "reveal" || e.phase === "scoreboard") return proximaPergunta(e.qNum);
+  // Depois de uma ronda de mímica mostra-se sempre a classificação, porque os pontos mudam muito.
+  if (e.phase === "mreveal" && e.qNum < e.total) return net.patch(caminho("state"), { phase: "scoreboard" });
+  if (e.phase === "reveal" || e.phase === "mreveal" || e.phase === "scoreboard") return proximaPergunta(e.qNum);
 };
 ACOES.terminar = () => {
   if (!confirm("Terminar o jogo agora e mostrar o pódio?")) return;
@@ -687,6 +936,34 @@ function ecraLobby(e, eq) {
     </main>`;
 }
 
+function ecraMimica(e, eq) {
+  const m = e.mim || {};
+  const ator = eq[m.ator] ? eq[m.ator].nome : "";
+  if (e.phase === "mpre") {
+    return `<div class="grinalda"></div><main class="e-pre">
+      <p class="e-num">Mímica ${m.n} de ${m.de}</p>
+      <h1 class="titulo">${esc(ator)}</h1>
+      <p class="e-joker">É a vossa vez de representar</p>
+      <p class="etiquetas"><span class="etq">${esc(m.cat)}</span><span class="etq">${DIFS[m.dif]}</span>${m.bonus ? `<span class="etq dobro">Vale a dobrar</span>` : ""}</p>
+      <p class="e-pe">As outras equipas escrevem a resposta no telemóvel. A primeira a adivinhar ganha ${m.base} pontos.</p></main>`;
+  }
+  if (e.phase === "mimica") {
+    const certos = Object.entries(m.certos || {}).filter(([id]) => eq[id]).sort((a, b) => a[1] - b[1]);
+    const lista = certos.length
+      ? `<ol class="e-certos">${certos.map(([id, pos]) => `<li><b>${pos}.º</b> ${esc(eq[id].nome)}</li>`).join("")}</ol>`
+      : `<p class="e-pe">${tempoAcabou() ? "Acabou o tempo!" : "Ainda ninguém adivinhou."}</p>`;
+    return `<main class="e-mimica">${etiquetasMimica(e)}<h1 class="pergunta">Representa: ${esc(ator)}</h1>${caixas(m.forma)}${relogio()}${lista}</main>`;
+  }
+  const rv = e.mrev || {};
+  const res = rv.res || {};
+  const linhas = Object.entries(res).filter(([id, r]) => eq[id] && r.pos).sort((a, b) => a[1].pos - b[1].pos)
+    .map(([id, r]) => `<li><b>${r.pos}.º</b> ${esc(eq[id].nome)} <span class="mais">+${r.g}</span></li>`).join("");
+  const ra = res[m.ator];
+  return `<main class="e-mimica">${etiquetasMimica(e)}<h1 class="pergunta">${ator ? `A equipa ${esc(ator)} estava a representar:` : "A resposta era:"}</h1>${caixas(rv.resposta)}
+    ${linhas ? `<ol class="e-certos">${linhas}</ol>` : `<p class="e-pe">Desta vez ninguém adivinhou.</p>`}
+    ${ra && ator ? `<p class="e-pe">${esc(ator)} ganha ${ra.g} pontos por representar.</p>` : ""}</main>`;
+}
+
 VISTAS.ecra = () => {
   if (S.meta === undefined || S.estado === undefined) return espera();
   if (S.meta === null || !S.estado) return semSala();
@@ -737,6 +1014,7 @@ VISTAS.ecra = () => {
     return `<main class="e-pergunta ${imagem ? "com-img" : ""}">${etiquetas(e)}${linhaJoker}<h1 class="pergunta">${esc(e.q.texto)}</h1>${imagem}${som}
       <ol class="opcoes ${e.q.opcoes.length <= 2 ? "duas" : ""}">${ops.join("")}</ol>${pe}</main>`;
   }
+  if (FASES_MIMICA.includes(e.phase)) return ecraMimica(e, eq);
   if (e.phase === "scoreboard") {
     return `<div class="grinalda"></div><main class="e-placar"><h1 class="titulo">Classificação</h1>${listaPontos(e.scores)}</main>`;
   }
@@ -801,6 +1079,85 @@ function semEquipa(e) {
     <p class="nota">${livres ? "Este telemóvel fica a ser o da equipa. É nele que se responde." : "Todas as equipas já têm telemóvel. Se o vosso deixou de funcionar, falem com o anfitrião."}</p>${erro}${cartoes}</main>`;
 }
 
+function equipaMimica(e, tid) {
+  const m = e.mim || {};
+  const eq = S.equipas;
+  const ator = eq[m.ator] ? eq[m.ator].nome : "outra equipa";
+  const topo = etiquetasMimica(e);
+  if (e.phase === "mreveal") {
+    const rv = e.mrev || {};
+    const r = rv.res && rv.res[tid];
+    const resposta = `<p class="nota">A resposta era:</p><p class="grande">${esc(rv.resposta)}</p>`;
+    if (!r) return `<h1 class="titulo">Entraram a meio</h1>${resposta}`;
+    if (r.ator) return `<h1 class="titulo ${r.g ? "bom" : ""}">${r.g ? "Boa mímica!" : "Ninguém adivinhou"}</h1><p class="grande">+${r.g} pontos</p><p class="nota">Adivinharam ${r.n} de ${plural(r.de, "equipa", "equipas")}.</p>`;
+    if (r.pos) return `<h1 class="titulo bom">Acertaram!</h1><p class="grande">+${r.g} pontos</p><p class="nota">Foram a ${r.pos}.ª equipa a adivinhar.</p>`;
+    return `<h1 class="titulo mau">Não adivinharam</h1>${resposta}`;
+  }
+  if (m.ator === tid) {
+    const p = S.palavra && S.palavra.key === m.key ? S.palavra : null;
+    const palavra = p ? `<p class="q-palavra">${esc(p.palavra)}</p>` : `<p class="nota">A carregar a palavra…</p>`;
+    if (e.phase === "mpre") {
+      return `${topo}<h1 class="titulo">É a vossa vez de representar</h1>${palavra}
+        <p class="nota">Escolham quem representa e não mostrem este ecrã às outras equipas. Sem falar, sem sons e sem escrever. O anfitrião dá o sinal para começar.</p>`;
+    }
+    const outros = equipasComTel().filter((id) => id !== tid).length;
+    const n = Object.keys(m.certos || {}).filter((id) => eq[id]).length;
+    return `${topo}${palavra}${relogio()}<p class="nota">${tempoAcabou() ? "Acabou o tempo!" : `${n === 1 ? "Já adivinhou" : "Já adivinharam"} ${n} de ${plural(outros, "equipa", "equipas")}.`}</p>`;
+  }
+  if (e.phase === "mpre") {
+    return `${topo}<h1 class="titulo">Mímica!</h1><p class="grande">Representa: ${esc(ator)}</p>
+      <p class="nota">Quando começar, escrevam aqui o que acham que é. Quem adivinha primeiro ganha mais pontos.</p>`;
+  }
+  const pos = m.certos && m.certos[tid];
+  if (pos) return `${topo}<h1 class="titulo bom">Acertaram!</h1><p class="grande">${pos}.ª equipa a adivinhar</p><p class="nota">Não digam a resposta em voz alta.</p>`;
+  if (tempoAcabou()) return `${topo}<h1 class="titulo">Acabou o tempo</h1><p class="nota">A resposta aparece já a seguir.</p>`;
+  // Este formulário não muda enquanto se escreve: o aviso por baixo é atualizado à parte, para o teclado não fechar.
+  return `${topo}<p class="q-pergunta">O que está a equipa ${esc(ator)} a representar?</p>${relogio()}
+    <form class="q-palpite" data-form="palpite">
+      <label for="palpite">A vossa resposta</label>
+      <input id="palpite" maxlength="40" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" enterkeyhint="send">
+      <button class="btn" data-enviar>Adivinhar</button>
+      <p class="fb" data-fb role="status"></p>
+    </form>
+    <p class="nota">Podem tentar as vezes que quiserem. Acentos e maiúsculas não contam.</p>`;
+}
+
+// Depois de um palpite errado há 3 segundos de pausa antes do seguinte.
+function fbPalpite() {
+  const el = document.querySelector("[data-fb]");
+  if (!el) return;
+  const e = S.estado;
+  const tid = minhaEquipa();
+  const meus = Object.values(S.meus || {}).sort((a, b) => (a.at || 0) - (b.at || 0));
+  const ult = meus[meus.length - 1];
+  const r = e && e.mim && e.mim.res && e.mim.res[tid];
+  const aVerificar = S.ui.aEnviar || meus.length > ((r && r.n) || 0);
+  const emPausa = !!ult && net.now() < (ult.at || 0) + 3000;
+  const texto = aVerificar ? "A verificar…" : ult ? `«${ult.t}» não é. Tentem outra vez.` : "";
+  if (el.textContent !== texto) el.textContent = texto;
+  const botao = document.querySelector("[data-enviar]");
+  if (botao) botao.disabled = !!(S.ui.aEnviar || emPausa);
+}
+
+FORMS.palpite = async (form) => {
+  const e = S.estado;
+  const tid = minhaEquipa();
+  const campo = form.querySelector("#palpite");
+  const t = campo.value.replace(/\s+/g, " ").trim().slice(0, 40);
+  if (!t || !e || e.phase !== "mimica" || !e.mim || !tid || S.ui.aEnviar) return;
+  const ultimo = Math.max(0, ...Object.values(S.meus || {}).map((g) => g.at || 0));
+  if (net.now() < ultimo + 3000) return;
+  S.ui.aEnviar = true;
+  campo.value = "";
+  campo.focus();
+  fbPalpite();
+  try {
+    await net.put(caminho(`guesses/${e.mim.key}/${tid}/g${net.now()}`), { t, at: net.ts() });
+  } catch { /* chegou depois do fim do tempo */ }
+  S.ui.aEnviar = false;
+  fbPalpite();
+};
+
 VISTAS.equipa = () => {
   if (S.meta === undefined || S.estado === undefined || S.equipas === undefined) return espera();
   if (S.meta === null || !S.estado) return semSala();
@@ -853,6 +1210,8 @@ VISTAS.equipa = () => {
     } else {
       corpo = `<h1 class="titulo mau">${r.c >= 0 ? "Errado" : "Sem resposta"}</h1>${r.g < 0 ? `<p class="grande">${r.g} pontos</p><p class="nota">O joker não correu bem.</p>` : ""}<p class="nota">A resposta certa era:</p><p class="grande">${esc(certa)}</p>`;
     }
+  } else if (FASES_MIMICA.includes(e.phase)) {
+    corpo = equipaMimica(e, tid);
   } else if (e.phase === "scoreboard") {
     corpo = `<h1 class="titulo">${meu ? `${meu.pos}.º lugar` : "Classificação"}</h1>${listaPontos(e.scores, tid)}`;
   } else {
@@ -927,7 +1286,7 @@ ACOES.responder = async ({ i }) => {
 
 function tique() {
   const e = S.estado;
-  if (!e || (e.phase !== "question" && e.phase !== "pre") || !e.startedAt) return;
+  if (!e || !["question", "pre", "mimica"].includes(e.phase) || !e.startedAt) return;
   const total = e.duracao * 1000;
   const resta = limita(e.startedAt + total - net.now(), 0, total);
   document.querySelectorAll("[data-seg]").forEach((el) => { el.textContent = Math.ceil(resta / 1000); });
@@ -937,7 +1296,9 @@ function tique() {
   });
   const fim = resta <= 0;
   if (fim !== !!S.ui.fim) { S.ui.fim = fim; pintar(); }
-  if (VISTA === "host" && net.now() >= e.startedAt + total + 400) (e.phase === "pre" ? mostrarPergunta() : revelar()).catch(console.error);
+  if (VISTA === "equipa" && e.phase === "mimica") fbPalpite();
+  if (VISTA === "host" && e.phase === "mimica") darPista();
+  if (VISTA === "host" && net.now() >= e.startedAt + total + 400) (e.phase === "pre" ? mostrarPergunta() : e.phase === "mimica" ? revelarMimica() : revelar()).catch(console.error);
 }
 
 // ---------- Som (só no ecrã principal) ----------
@@ -1007,6 +1368,39 @@ function aoEstado() {
   }
 }
 
+// Segue um caminho da base de dados e muda de caminho quando a chave muda.
+// cb(undefined) avisa que os dados antigos deixaram de valer.
+const vigias = {};
+function vigia(nome, chave, caminhoCompleto, cb) {
+  const atual = vigias[nome];
+  if (atual && atual.chave === chave) return;
+  if (atual && atual.fim) atual.fim();
+  const novo = { chave, fim: null };
+  vigias[nome] = novo;
+  cb(undefined);
+  if (chave) novo.fim = net.watch(caminhoCompleto, (v) => { if (vigias[nome] === novo) cb(v); });
+}
+
+function aoMimica() {
+  const e = S.estado;
+  const m = e && FASES_MIMICA.includes(e.phase) ? e.mim : null;
+  if (VISTA === "host") {
+    if (!souAnfitriao()) return;
+    const k = m ? m.key : null;
+    vigia("palpites", k, caminho("guesses/" + k), (v) => {
+      S.palpites = v === undefined ? null : v || {};
+      S.palpKey = v === undefined ? null : k;
+      if (v !== undefined) verPalpites();
+      pintar();
+    });
+  } else if (VISTA === "equipa") {
+    const tid = minhaEquipa();
+    vigia("palavra", tid, caminho("mimica/" + tid), (v) => { S.palavra = v || null; pintar(); });
+    const k = m && tid && m.ator !== tid ? `${m.key}/${tid}` : null;
+    vigia("meus", k, caminho("guesses/" + k), (v) => { S.meus = v || null; pintar(); });
+  }
+}
+
 async function manterAcordado() {
   if (!("wakeLock" in navigator)) return;
   const pede = async () => { try { await navigator.wakeLock.request("screen"); } catch { /* o navegador recusou */ } };
@@ -1033,6 +1427,7 @@ app.addEventListener("change", (ev) => {
   else if (t.matches && t.matches("select[data-juntar]")) juntar(t).catch(falha);
 });
 app.addEventListener("input", (ev) => {
+  if (VISTA === "criar" && ["n", "mi_cada"].includes(ev.target.id)) atualizarDisponiveis();
   if (ev.target.id === "cod") ev.target.value = ev.target.value.toUpperCase().replace(/[^A-Z]/g, "");
 });
 
@@ -1062,12 +1457,12 @@ async function arrancar() {
     privLigado = true;
     net.watch(caminho("private"), (p) => { S.priv = p; pintar(); });
   };
-  net.watch(caminho("meta"), (v) => { S.meta = v; ligaPriv(); aoEstado(); pintar(); });
-  if (VISTA === "host") net.watch(caminho("hosts/" + S.uid), (v) => { S.hostExtra = !!v; ligaPriv(); aoEstado(); pintar(); });
+  net.watch(caminho("meta"), (v) => { S.meta = v; ligaPriv(); aoEstado(); aoMimica(); pintar(); });
+  if (VISTA === "host") net.watch(caminho("hosts/" + S.uid), (v) => { S.hostExtra = !!v; ligaPriv(); aoEstado(); aoMimica(); pintar(); });
   net.watch(caminho("players"), (v) => { S.jogadores = v || {}; pintar(); });
   net.watch(caminho("jokers"), (v) => { S.jokers = v || {}; pintar(); });
-  net.watch(caminho("state"), (v) => { S.estado = v; aoEstado(); pintar(); });
-  net.watch(caminho("teams"), (v) => { S.equipas = v || {}; aoEstado(); if (VISTA === "host") aoResponder(); pintar(); });
+  net.watch(caminho("state"), (v) => { S.estado = v; aoEstado(); aoMimica(); if (VISTA === "host") verPalpites(); pintar(); });
+  net.watch(caminho("teams"), (v) => { S.equipas = v || {}; aoEstado(); aoMimica(); if (VISTA === "host") aoResponder(); pintar(); });
   setInterval(tique, 200);
   manterAcordado();
 }

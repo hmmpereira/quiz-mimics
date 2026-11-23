@@ -62,16 +62,26 @@ export const CFG_PADRAO = {
   joker_certo: 2,
   joker_errado: -50,
   tempo_joker: 8,
+  mimica_1: 100,
+  mimica_2: 80,
+  mimica_3: 60,
+  mimica_restantes: 40,
+  mimica_atores_max: 150,
+  mimica_mult_medio: 1.5,
+  mimica_mult_dificil: 2,
+  tempo_mimica: 60,
+  perguntas_por_mimica: 5,
 };
 
 export function lerConfig(tab) {
-  const cfg = { ...CFG_PADRAO, extras: [] };
+  const cfg = { ...CFG_PADRAO, pista_mimica: false, extras: [] };
   if (!tab || !tab.ok) return cfg;
   for (const l of tab.linhas) {
     const k = norm(l.c.chave).replace(/\s+/g, "_");
     const v = l.c.valor;
     if (!k || v == null || v === "") continue;
     if (k.startsWith("regra_extra")) { cfg.extras.push(v); continue; }
+    if (k === "pista_mimica") { cfg[k] = ["sim", "s", "true", "1", "yes"].includes(norm(v)); continue; }
     const num = Number(String(v).replace(",", "."));
     if (!Number.isFinite(num) || !(k in CFG_PADRAO)) continue;
     if (k === "joker_errado") cfg[k] = -Math.abs(num);
@@ -264,6 +274,12 @@ export function regras(cfg) {
   if (cfg.vel) r.push(`Quem acerta mais depressa ganha até ${cfg.vel} pontos extra.`);
   if (cfg.tem2x) r.push("Algumas perguntas valem a dobrar. O ecrã avisa antes.");
   if (cfg.joker) r.push(`Cada equipa tem um joker para o jogo inteiro. Joga-se antes de ver a pergunta: se acertarem, os pontos contam a dobrar; se errarem, perdem ${Math.abs(cfg.joker.errado)} pontos.`);
+  const m = cfg.mim;
+  if (m) {
+    r.push(`${m.cada === 1 ? "Depois de cada pergunta" : `A cada ${m.cada} perguntas`} há uma ronda de mímica: uma equipa representa e as outras escrevem no telemóvel o que acham que é.`);
+    r.push(`Na mímica, a primeira equipa a adivinhar ganha ${m.pts[0]} pontos e as seguintes ${m.pts[1]}, ${m.pts[2]} e ${m.pts[3]}. Quem representa ganha até ${m.atores}, conforme o número de equipas que acertarem.`);
+    r.push(`Quem representa não pode falar, fazer sons nem escrever.${m.pista ? " A meio do tempo aparece uma letra de ajuda." : ""}`);
+  }
   r.push(cfg.placar === 1 ? "A classificação aparece depois de cada pergunta." : `A classificação aparece a cada ${cfg.placar} perguntas.`);
   r.push("Em caso de empate, fica à frente a equipa que respondeu mais depressa.");
   for (const e of cfg.extras || []) if (e) r.push(e);
@@ -286,4 +302,96 @@ export function sortear(pessoas, k, rng = Math.random) {
   const grupos = Array.from({ length: k }, () => []);
   baralhar(pessoas, rng).forEach((p, i) => grupos[i % k].push(p));
   return grupos;
+}
+
+// ---------- Mímica ----------
+
+const ARTIGOS = /^(o|a|os|as|um|uma|uns|umas)\s+/;
+
+// Deixa só letras e números, sem acentos, maiúsculas, pontuação nem artigo no início.
+export function limpaPalpite(texto) {
+  return norm(texto).replace(/[^a-z0-9]+/g, " ").trim().replace(ARTIGOS, "");
+}
+
+// Verdadeiro se as duas palavras diferem, no máximo, numa letra (trocada, a mais, a menos ou fora do sítio).
+function quaseIgual(a, b) {
+  if (a === b) return true;
+  if (Math.abs(a.length - b.length) > 1) return false;
+  let i = 0;
+  while (i < a.length && i < b.length && a[i] === b[i]) i++;
+  if (a.length === b.length) {
+    return a.slice(i + 1) === b.slice(i + 1) || (a[i] === b[i + 1] && a[i + 1] === b[i] && a.slice(i + 2) === b.slice(i + 2));
+  }
+  return a.length > b.length ? a.slice(i + 1) === b.slice(i) : a.slice(i) === b.slice(i + 1);
+}
+
+// Diz se um palpite acerta no desafio: a resposta ou uma das alternativas.
+// Em respostas com 6 ou mais letras perdoa-se um erro de escrita.
+export function acerta(palpite, desafio) {
+  const g = limpaPalpite(palpite).replace(/ /g, "");
+  if (!g) return false;
+  return [desafio.r, ...(desafio.alt || [])].some((x) => {
+    const a = limpaPalpite(x).replace(/ /g, "");
+    return !!a && (g === a || (a.length >= 6 && quaseIgual(g, a)));
+  });
+}
+
+const arrumada = (resposta) => Array.from(String(resposta).replace(/\s+/g, " ").trim());
+const eLetra = (ch) => /[\p{L}\p{N}]/u.test(ch);
+
+// O desenho da resposta para o ecrã: um traço por letra, espaços e pontuação à vista.
+export function forma(resposta) {
+  return arrumada(resposta).map((ch) => (eLetra(ch) ? "_" : ch)).join("");
+}
+
+// Revela uma letra ao acaso. Se só faltar uma letra, não revela nada.
+export function comPista(formaAtual, resposta, rng = Math.random) {
+  const letras = arrumada(resposta);
+  const f = Array.from(formaAtual);
+  const livres = f.map((c, i) => (c === "_" ? i : -1)).filter((i) => i >= 0);
+  if (livres.length < 2) return formaAtual;
+  const i = livres[Math.floor(rng() * livres.length)];
+  f[i] = letras[i].toUpperCase();
+  return f.join("");
+}
+
+export function validarMimicas(tab) {
+  const boas = [];
+  const erros = [];
+  for (const l of tab.linhas) {
+    const c = l.c;
+    if ([c.tema, c.categoria, c.resposta, c.alternativas].every((v) => !v)) continue;
+    const erro = (msg) => erros.push({ linha: l.n, msg });
+    if (!c.resposta) { erro("falta a resposta" + DICA_NUMERO); continue; }
+    if (!limpaPalpite(c.resposta)) { erro("a resposta tem de ter letras ou números"); continue; }
+    const dif = parseInt(c.dificuldade, 10);
+    if (![1, 2, 3].includes(dif)) { erro("a dificuldade tem de ser 1, 2 ou 3"); continue; }
+    boas.push({
+      linha: l.n,
+      tema: c.tema || "Geral",
+      cat: c.categoria || "Mímica",
+      dif,
+      r: c.resposta.replace(/\s+/g, " ").trim().slice(0, 40),
+      alt: String(c.alternativas || "").split(";").map((x) => x.trim()).filter(Boolean).slice(0, 10),
+      bonus: norm(c.bonus) === "2x",
+    });
+  }
+  return { boas, erros };
+}
+
+// Pontos de uma ronda de mímica. ordem = equipas que adivinharam, da primeira à última;
+// outros = equipas que podiam adivinhar. pos = lugar em que adivinhou (0 = não adivinhou).
+export function pontuarMimica({ ordem, outros, ator, equipas, pts = [100, 80, 60, 40], atores = 150, multDif = 1, multBonus = 1 }) {
+  const res = {};
+  for (const id of Object.keys(equipas || {})) res[id] = { g: 0, t: 0, pos: 0 };
+  const certos = ordem.filter((id, i) => res[id] && id !== ator && ordem.indexOf(id) === i);
+  certos.forEach((id, i) => {
+    res[id] = { g: Math.round(pts[Math.min(i, pts.length - 1)] * multDif) * multBonus, t: 0, pos: i + 1 };
+  });
+  if (res[ator]) {
+    const de = Math.max(certos.length, outros.filter((id) => id !== ator).length);
+    const parte = de ? certos.length / de : 0;
+    res[ator] = { g: Math.round(atores * parte * multDif) * multBonus, t: 0, pos: 0, ator: true, n: certos.length, de };
+  }
+  return res;
 }
